@@ -62,7 +62,11 @@ function shuffle(list, rng) {
   return a;
 }
 
-function sealBorder(grid) {
+export function blankMaze() {
+  return Array.from({ length: ROWS }, () => Array(COLS).fill(WALL));
+}
+
+export function sealBorder(grid) {
   for (let c = 0; c < COLS; c++) {
     grid[0][c] = WALL;
     grid[ROWS - 1][c] = WALL;
@@ -73,7 +77,7 @@ function sealBorder(grid) {
   }
 }
 
-function carveRoom(grid, x, y, w, h) {
+export function carveRoom(grid, x, y, w, h) {
   for (let r = y; r < y + h; r++) {
     for (let c = x; c < x + w; c++) {
       if (r <= 0 || c <= 0 || r >= ROWS - 1 || c >= COLS - 1) continue;
@@ -82,7 +86,7 @@ function carveRoom(grid, x, y, w, h) {
   }
 }
 
-function carveTunnel(grid, c0, r0, c1, r1) {
+export function carveTunnel(grid, c0, r0, c1, r1) {
   let c = c0;
   let r = r0;
   const set = (cc, rr) => {
@@ -150,7 +154,7 @@ export function connectAllFloors(grid) {
   }
 }
 
-function backtracker(grid, rng, x0, y0, x1, y1) {
+export function backtracker(grid, rng, x0, y0, x1, y1) {
   const stack = [];
   const step = [[2, 0], [-2, 0], [0, 2], [0, -2]];
   let start = null;
@@ -188,7 +192,7 @@ function backtracker(grid, rng, x0, y0, x1, y1) {
   }
 }
 
-function sprinkleLoops(grid, rng, x0, y0, x1, y1, chance) {
+export function sprinkleLoops(grid, rng, x0, y0, x1, y1, chance) {
   for (let r = Math.max(1, y0); r <= Math.min(ROWS - 2, y1); r++) {
     for (let c = Math.max(1, x0); c <= Math.min(COLS - 2, x1); c++) {
       if (grid[r][c] !== WALL) continue;
@@ -199,18 +203,90 @@ function sprinkleLoops(grid, rng, x0, y0, x1, y1, chance) {
   }
 }
 
-export function generateMaze(rng = Math.random) {
-  const grid = Array.from({ length: ROWS }, () => Array(COLS).fill(WALL));
-  backtracker(grid, rng, 1, 1, COLS - 2, ROWS - 2);
-  sprinkleLoops(grid, rng, 1, 1, COLS - 2, ROWS - 2, 0.055);
+const SAFE_ROOMS = [
+  { x0: 1, y0: 1, x1: 6, y1: 6, c: 5, r: 3, dx: 1, dy: 0 },
+  { x0: COLS - 7, y0: 1, x1: COLS - 2, y1: 6, c: COLS - 6, r: 3, dx: -1, dy: 0 },
+  { x0: 1, y0: ROWS - 7, x1: 6, y1: ROWS - 2, c: 5, r: ROWS - 4, dx: 1, dy: 0 },
+  { x0: COLS - 7, y0: ROWS - 7, x1: COLS - 2, y1: ROWS - 2, c: COLS - 6, r: ROWS - 4, dx: -1, dy: 0 },
+];
+
+export function inSafeChamber(c, r) {
+  return SAFE_ROOMS.some((room) => c >= room.x0 && r >= room.y0 && c <= room.x1 && r <= room.y1);
+}
+
+export function spawnQuiet(c, r) {
+  for (const [sc, sr] of spawnTiles()) {
+    if (Math.abs(c - sc) + Math.abs(r - sr) < 10) return true;
+  }
+  return false;
+}
+
+function carveSafeRooms(grid) {
+  const outside = new Set();
+  const key = (c, r) => r * COLS + c;
+  for (let r = 1; r < ROWS - 1; r++) {
+    for (let c = 1; c < COLS - 1; c++) {
+      if (grid[r][c] === FLOOR && !inSafeChamber(c, r)) outside.add(key(c, r));
+    }
+  }
+  for (const room of SAFE_ROOMS) {
+    for (let r = room.y0; r <= room.y1; r++) {
+      for (let c = room.x0; c <= room.x1; c++) {
+        if (c <= 0 || r <= 0 || c >= COLS - 1 || r >= ROWS - 1) continue;
+        grid[r][c] = WALL;
+      }
+    }
+    carveRoom(grid, room.x0 + 1, room.y0 + 1, room.x1 - room.x0 - 1, room.y1 - room.y0 - 1);
+    let c = room.c;
+    let r = room.r;
+    if (c > 0 && r > 0 && c < COLS - 1 && r < ROWS - 1) grid[r][c] = FLOOR;
+    let joined = false;
+    for (let n = 0; n < 16; n++) {
+      c += room.dx;
+      r += room.dy;
+      if (c <= 0 || r <= 0 || c >= COLS - 1 || r >= ROWS - 1) break;
+      const hit = outside.has(key(c, r));
+      grid[r][c] = FLOOR;
+      if (hit) {
+        joined = true;
+        break;
+      }
+    }
+    if (!joined) {
+      let best = null;
+      let bestD = Infinity;
+      for (const id of outside) {
+        const cc = id % COLS;
+        const rr = (id / COLS) | 0;
+        const d = Math.abs(cc - c) + Math.abs(rr - r);
+        if (d < bestD) {
+          bestD = d;
+          best = [cc, rr];
+        }
+      }
+      if (best) carveTunnel(grid, c, r, best[0], best[1]);
+    }
+  }
+}
+
+export function finishMap(grid) {
   for (const [x, y] of [[1, 1], [COLS - 6, 1], [1, ROWS - 6], [COLS - 6, ROWS - 6]]) {
     carveRoom(grid, x, y, 5, 5);
   }
   carveRoom(grid, LAIR.x, LAIR.y, LAIR.w, LAIR.h);
   sealBorder(grid);
   connectAllFloors(grid);
+  carveSafeRooms(grid);
+  connectAllFloors(grid);
   sealBorder(grid);
   return grid;
+}
+
+export function generateMaze(rng = Math.random) {
+  const grid = blankMaze();
+  backtracker(grid, rng, 1, 1, COLS - 2, ROWS - 2);
+  sprinkleLoops(grid, rng, 1, 1, COLS - 2, ROWS - 2, 0.055);
+  return finishMap(grid);
 }
 
 function connectToNearestFloor(grid, c, r, region) {

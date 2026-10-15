@@ -549,8 +549,44 @@ export function tileCanvas(name) {
   return tile(name);
 }
 
+const HUNTER_IDS = ['knight', 'archer', 'wizard', 'thief'];
+
+export function hunterPortrait(classId) {
+  const id = HUNTER_IDS.includes(classId) ? classId : 'knight';
+  return `art/hunters/${id}/idle_0.png`;
+}
+
+function ensureHunters() {
+  if (bank.has('hunters-ready') || typeof document === 'undefined' || typeof Image === 'undefined') return;
+  bank.set('hunters-ready', true);
+  for (const id of HUNTER_IDS) {
+    for (let i = 0; i < 4; i++) queueHunter(id, `idle_${i}`);
+    for (let i = 0; i < 4; i++) queueHunter(id, `run_${i}`);
+    queueHunter(id, 'hit');
+  }
+}
+
+function queueHunter(id, frame) {
+  const key = `hunter|${id}|${frame}`;
+  const img = new Image();
+  img.onload = () => {
+    const out = document.createElement('canvas');
+    out.width = img.naturalWidth * 2;
+    out.height = img.naturalHeight * 2;
+    const g = out.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    g.drawImage(img, 0, 0, out.width, out.height);
+    bank.set(key, out);
+  };
+  img.src = hunterPortrait(id).replace('idle_0.png', `${frame}.png`);
+}
+
 export function hunterCanvas(classId, color, dir, frame) {
-  return actor(classId, color, dir, frame);
+  ensureHunters();
+  const packed = bank.get(`hunter|${classId}|${frame}`);
+  if (packed) return packed;
+  const posed = frame === 'hit' ? 'swing' : String(frame).startsWith('run') ? 'walk' : frame === 'block' ? 'block' : 'idle';
+  return actor(classId, color, dir, posed);
 }
 
 export function monsterCanvas(kind, dir, frame) {

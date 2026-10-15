@@ -1,7 +1,9 @@
 import { KEYBINDS, HUNTER_NAMES, HUNTER_COLORS, CLASSES, CLASS_ORDER } from './config.js';
 import { createMatch, updateMatch, leverReadout } from './game.js';
+import { mapByIndex, peekMapIndex, takeMapIndex } from './maps.js';
 import { thinkBot } from './ai.js';
 import { render, updateCamera, frameMap, focusSword } from './render.js';
+import { hunterPortrait } from './sprites.js';
 import { createAudio } from './audio.js';
 
 const canvas = document.getElementById('view');
@@ -32,7 +34,7 @@ for (const bind of KEYBINDS) {
 let mode = 'menu';
 let humanCount = 1;
 const seatClasses = [...CLASS_ORDER];
-let game = createMatch(0, Math.random, seatClasses);
+let game = createMatch(0, Math.random, seatClasses, peekMapIndex());
 let camera = frameMap(view);
 let muted = false;
 
@@ -80,6 +82,7 @@ for (const button of document.querySelectorAll('[data-humans]')) {
 }
 renderClassPicks();
 paintBoard('scoreboard');
+labelNextMap();
 
 new ResizeObserver(() => resize()).observe(stage);
 resize();
@@ -103,11 +106,12 @@ function frame(now) {
   } else if (mode === 'pause') {
     render(ctx, game, view, camera, { reduce: reduceMotion });
   } else {
-    const intents = mode === 'play'
+    game.frozen = (camera.introLeft || 0) > 0;
+    const intents = mode === 'play' && !game.frozen
       ? game.players.map((p, i) => (p.bot ? thinkBot(p, game, dt) : humanIntent(p, i)))
       : game.players.map(() => ({ mx: 0, my: 0, attack: false, charge: false, use: false }));
     clickAttack = false;
-    updateMatch(game, intents, dt);
+    updateMatch(game, intents, dt, game.frozen);
     updateCamera(camera, game, view, held.has('KeyZ'), dt);
     if (game.phase === 'victory' && mode === 'play') showEnd();
     render(ctx, game, view, camera, { reduce: reduceMotion });
@@ -169,10 +173,16 @@ function gamepadIntent(index) {
   return { mx, my, attack: edge(0), charge: edge(1), use: edge(2), block: buttons[3], sprint: buttons[4] };
 }
 
+function labelNextMap() {
+  const el = document.getElementById('next-map');
+  if (!el) return;
+  el.textContent = `Next maze · ${mapByIndex(peekMapIndex()).name}`;
+}
+
 function startMatch(count) {
   audio.unlock();
   humanCount = count;
-  game = createMatch(count, Math.random, seatClasses);
+  game = createMatch(count, Math.random, seatClasses, takeMapIndex());
   camera = focusSword(view, game.sword);
   buildHud();
   menu.classList.add('hidden');
@@ -192,7 +202,8 @@ function setMode(next) {
 }
 
 function returnToMenu() {
-  game = createMatch(0, Math.random, seatClasses);
+  game = createMatch(0, Math.random, seatClasses, peekMapIndex());
+  labelNextMap();
   camera = frameMap(view);
   menu.classList.remove('hidden');
   pause.classList.add('hidden');
@@ -381,6 +392,10 @@ function renderClassPicks() {
     btn.type = 'button';
     btn.className = 'class-pick';
     btn.style.setProperty('--pc', HUNTER_COLORS[i]);
+    const portrait = document.createElement('img');
+    portrait.className = 'hunter-portrait';
+    portrait.src = hunterPortrait(id);
+    portrait.alt = cls.name;
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
     const who = document.createElement('span');
@@ -392,7 +407,7 @@ function renderClassPicks() {
     const blurb = document.createElement('span');
     blurb.className = 'blurb';
     blurb.textContent = cls.blurb;
-    btn.append(swatch, who, calling, blurb);
+    btn.append(portrait, swatch, who, calling, blurb);
     btn.addEventListener('click', () => {
       const next = CLASS_ORDER[(CLASS_ORDER.indexOf(id) + 1) % CLASS_ORDER.length];
       seatClasses[i] = next;

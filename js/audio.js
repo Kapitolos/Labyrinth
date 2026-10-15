@@ -42,6 +42,10 @@ export function createAudio() {
         tone(ac, t, 180, 0.12, 'square', 0.03, -80);
       } else if (name === 'horn') tone(ac, t, 70, 0.38, 'sawtooth', 0.05, 20);
       else if (name === 'pop') tone(ac, t, 320, 0.06, 'square', 0.03, -80);
+      else if (name === 'squeak') {
+        tone(ac, t, 680, 0.08, 'square', 0.02, -360);
+        tone(ac, t + 0.06, 420, 0.14, 'sawtooth', 0.016, -220);
+      }
       else if (name === 'win') {
         [523, 659, 784, 1046].forEach((freq, i) => {
           tone(ac, t + i * 0.11, freq, 0.18, 'triangle', 0.04, 0);

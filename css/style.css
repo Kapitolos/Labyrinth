@@ -304,10 +304,10 @@ h2 { margin: 6px 0 8px; font-size: 32px; font-weight: 600; }
 #class-picks { display: grid; gap: 6px; }
 .class-pick {
   display: grid;
-  grid-template-columns: 18px 72px 1fr;
+  grid-template-columns: 36px 18px 72px 1fr;
   grid-template-areas:
-    "swatch who calling"
-    "swatch blurb blurb";
+    "portrait swatch who calling"
+    "portrait swatch blurb blurb";
   gap: 2px 8px;
   align-items: center;
   width: 100%;
@@ -320,6 +320,15 @@ h2 { margin: 6px 0 8px; font-size: 32px; font-weight: 600; }
   cursor: pointer;
 }
 .class-pick:hover, .class-pick:focus-visible { border-color: var(--gold); }
+.class-pick .hunter-portrait {
+  grid-area: portrait;
+  height: 52px;
+  width: auto;
+  image-rendering: pixelated;
+  object-fit: contain;
+  object-position: center bottom;
+  justify-self: center;
+}
 .class-pick .swatch { grid-area: swatch; width: 12px; height: 12px; background: var(--pc); }
 .class-pick .who { grid-area: who; color: var(--dim); font-size: 13px; }
 .class-pick .calling { grid-area: calling; color: #f6e7c4; }

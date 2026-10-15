@@ -1,0 +1,2 @@
+﻿These hunter sprites are frames from 0x72 Dungeon Tileset II.
+License: CC0 1.0 Universal. https://0x72.itch.io/dungeontileset-ii

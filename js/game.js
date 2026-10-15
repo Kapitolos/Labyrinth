@@ -12,11 +12,12 @@ import {
   tileCenter, tileOf,
 } from './config.js';
 import {
-  generateMaze, defineRegions, spawnTiles, lairCenter, inLair,
-  scrambleRegion, isFloor, nearestFloorTile, pointInRegion,
+  defineRegions, spawnTiles, lairCenter, inLair,
+  scrambleRegion, isFloor, nearestFloorTile, pointInRegion, spawnQuiet, inSafeChamber,
 } from './maze.js';
+import { mapByIndex, mapCount } from './maps.js';
 import { flood, shortestStep, lineOfSight } from './path.js';
-import { refreshVision, forgetRegion, REVEAL_TIME } from './vision.js';
+import { refreshVision, forgetRegion, REVEAL_TIME, sees } from './vision.js';
 
 function classFor(index, classIds) {
   const id = classIds && classIds[index];
@@ -24,13 +25,20 @@ function classFor(index, classIds) {
   return CLASSES[CLASS_ORDER[index % CLASS_ORDER.length]];
 }
 
-export function createMatch(humanCount, rng = Math.random, classIds = null) {
+const GOBLIN_PACK = 16;
+
+export function createMatch(humanCount, rng = Math.random, classIds = null, mapIndex = 0) {
   const humans = Math.max(0, Math.min(4, humanCount | 0));
-  const grid = generateMaze(rng);
+  const theme = mapByIndex(mapIndex);
+  const index = ((mapIndex % mapCount()) + mapCount()) % mapCount();
+  const grid = theme.build(rng);
   const regions = defineRegions();
-  const switches = placeSwitches(grid, regions, rng);
+  const reserved = new Set();
+  for (const [c, r] of mouthTiles(grid)) reserved.add(`${c},${r}`);
+  for (const [c, r] of spawnTiles()) reserved.add(`${c},${r}`);
+  const switches = placeSwitches(grid, regions, rng, reserved);
   const blocked = new Set(switches.map((sw) => `${sw.c},${sw.r}`));
-  for (const [c, r] of spawnTiles()) blocked.add(`${c},${r}`);
+  for (const key of reserved) blocked.add(key);
   const [lc, lr] = lairCenter();
   const chests = placeChests(grid, rng, blocked);
   for (const chest of chests) blocked.add(`${chest.c},${chest.r}`);
@@ -38,6 +46,8 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
   const game = {
     rng,
     grid,
+    theme,
+    mapIndex: index,
     humanCount: humans,
     players: [],
     minotaur: null,
@@ -51,15 +61,17 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
     texts: [],
     toasts: [],
     fx: [],
+    callout: null,
     phase: 'play',
     winner: null,
     time: 0,
     shake: 0,
     flash: 0,
-    banner: 'Three charges. Then take them from someone else',
+    banner: theme.name,
     bannerT: 3.6,
     nextId: 1,
-    spawnT: 16,
+    spawnT: 22,
+    cultistSpawnT: 34,
     pityT: 4,
   };
 
@@ -132,8 +144,8 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
   }
 
   const [sx, sy] = tileCenter(lc, lr);
-  game.sword = { x: sx, y: sy, c: lc, r: lr, held: null, radius: 8, charges: SWORD_CHARGES, public: true };
-  game.gates = placeGates(grid);
+  game.sword = { x: sx, y: sy, c: lc, r: lr, held: null, radius: 8, charges: SWORD_CHARGES, public: true, dropped: false };
+  game.gates = placeGates(grid, reserved);
   game.gateCd = 0;
   const [mx, my] = tileCenter(lc, lr + 1);
   game.minotaur = {
@@ -156,6 +168,7 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
     kbx: 0,
     kby: 0,
     hurtFlash: 0,
+    reveal: 0,
   };
 
   const avoid = spawns.map(([c, r]) => [c, r]);
@@ -163,28 +176,189 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
   for (const sw of switches) avoid.push([sw.c, sw.r]);
   for (const chest of chests) avoid.push([chest.c, chest.r]);
   for (const gate of game.gates) avoid.push([gate.c, gate.r]);
-  for (let n = 0; n < 7; n++) {
-    const spot = findSpot(grid, rng, avoid, 4, (c, r) => !inLair(c, r));
-    if (!spot) break;
-    avoid.push(spot);
-    game.goblins.push(makeGoblin(game, spot[0], spot[1]));
-  }
-
+  game.doors = placeDoors(grid, rng, new Set(avoid.map(([c, r]) => `${c},${r}`)));
+  indexDoors(game);
+  for (const door of game.doors) avoid.push([door.c, door.r]);
   game.cultists = [];
   game.flames = [];
   for (let n = 0; n < 3; n++) {
-    const spot = findSpot(grid, rng, avoid, 8, (c, r) => !inLair(c, r));
+    const spot = findSpot(grid, rng, avoid, 6, (c, r) => !inLair(c, r) && !spawnQuiet(c, r));
     if (!spot) break;
     avoid.push(spot);
     game.cultists.push(makeCultist(game, spot[0], spot[1]));
   }
+  for (let n = 0; n < GOBLIN_PACK; n++) {
+    const spot = findSpot(grid, rng, avoid, 3, (c, r) => !inLair(c, r) && !spawnQuiet(c, r));
+    if (!spot) break;
+    avoid.push(spot);
+    game.goblins.push(makeGoblin(game, spot[0], spot[1]));
+  }
+  game.goblinCap = game.goblins.length;
+  game.cultistCap = game.cultists.length;
 
   refreshVision(game);
   return game;
 }
 
-function placeSwitches(grid, regions, rng) {
-  const used = new Set();
+const HEAR = 280;
+const CHARGE_MAP = 5.2;
+
+function placeDoors(grid, rng, blocked, region = null, existing = []) {
+  const doors = [];
+  const tooClose = (c, r) => {
+    if (blocked.has(`${c},${r}`)) return true;
+    for (const door of existing) {
+      if (Math.abs(door.c - c) + Math.abs(door.r - r) < 7) return true;
+    }
+    for (const door of doors) {
+      if (Math.abs(door.c - c) + Math.abs(door.r - r) < 7) return true;
+    }
+    return false;
+  };
+  const add = (c, r, force = false) => {
+    if (!isFloor(grid, c, r) || inLair(c, r) || inSafeChamber(c, r)) return;
+    if (force ? blocked.has(`${c},${r}`) : tooClose(c, r)) return;
+    const horizontal = isFloor(grid, c - 1, r) && isFloor(grid, c + 1, r);
+    const [x, y] = tileCenter(c, r);
+    doors.push({ c, r, x, y, open: false, axis: horizontal ? 'h' : 'v', ping: 0, leaf: 0 });
+    blocked.add(`${c},${r}`);
+  };
+  const inside = (c, r) => !region || (c >= region.x && r >= region.y && c < region.x + region.w && r < region.y + region.h);
+  if (!region) {
+    for (let r = 1; r < ROWS - 1; r++) {
+      for (let c = 1; c < COLS - 1; c++) {
+        if (!isFloor(grid, c, r) || inSafeChamber(c, r)) continue;
+        const mouth = DIRS.some(([dc, dr]) => inSafeChamber(c + dc, r + dr) && isFloor(grid, c + dc, r + dr));
+        if (mouth) add(c, r, true);
+      }
+    }
+  }
+  const halls = [];
+  for (let r = 1; r < ROWS - 1; r++) {
+    for (let c = 1; c < COLS - 1; c++) {
+      if (!inside(c, r) || !isFloor(grid, c, r) || inSafeChamber(c, r) || inLair(c, r)) continue;
+      const east = isFloor(grid, c - 1, r) && isFloor(grid, c + 1, r);
+      const north = isFloor(grid, c, r - 1) && isFloor(grid, c, r + 1);
+      const side = east ? !isFloor(grid, c, r - 1) && !isFloor(grid, c, r + 1) : north && !isFloor(grid, c - 1, r) && !isFloor(grid, c + 1, r);
+      if (side) halls.push([c, r]);
+    }
+  }
+  for (let i = halls.length - 1; i > 0; i--) {
+    const j = (rng() * (i + 1)) | 0;
+    const tmp = halls[i];
+    halls[i] = halls[j];
+    halls[j] = tmp;
+  }
+  const cap = region ? 6 : 18;
+  for (const [c, r] of halls) {
+    if (doors.length >= cap) break;
+    if (rng() > 0.4) continue;
+    add(c, r);
+  }
+  if (!region && doors.length < 12) {
+    const edges = [];
+    for (let r = 1; r < ROWS - 1; r++) {
+      for (let c = 1; c < COLS - 1; c++) {
+        if (!isFloor(grid, c, r) || inSafeChamber(c, r) || inLair(c, r)) continue;
+        let n = 0;
+        for (const [dc, dr] of DIRS) if (isFloor(grid, c + dc, r + dr)) n += 1;
+        if (n >= 2 && n <= 3) edges.push([c, r]);
+      }
+    }
+    for (let i = edges.length - 1; i > 0; i--) {
+      const j = (rng() * (i + 1)) | 0;
+      const tmp = edges[i];
+      edges[i] = edges[j];
+      edges[j] = tmp;
+    }
+    for (const [c, r] of edges) {
+      if (doors.length >= 12) break;
+      add(c, r);
+    }
+  }
+  return doors;
+}
+
+function indexDoors(game) {
+  const of = new Uint16Array(COLS * ROWS);
+  const shut = new Uint8Array(COLS * ROWS);
+  for (let i = 0; i < game.doors.length; i++) {
+    const door = game.doors[i];
+    if (!isFloor(game.grid, door.c, door.r)) continue;
+    of[door.r * COLS + door.c] = i + 1;
+    if (!door.open) shut[door.r * COLS + door.c] = 1;
+  }
+  game.doorOf = of;
+  game.grid.shut = shut;
+}
+
+function doorAt(game, c, r) {
+  if (!game.doorOf || c < 0 || r < 0 || c >= COLS || r >= ROWS) return null;
+  const i = game.doorOf[r * COLS + c];
+  return i ? game.doors[i - 1] : null;
+}
+
+function heardNear(game, x, y, range = HEAR) {
+  const ears = game.players.filter((p) => p.alive && !p.bot);
+  const who = ears.length ? ears : game.players.filter((p) => p.alive);
+  return who.some((p) => Math.hypot(p.x - x, p.y - y) <= range);
+}
+
+function openDoor(game, door) {
+  if (!door || door.open) return;
+  door.open = true;
+  door.ping = 2.4;
+  if (game.grid.shut) game.grid.shut[door.r * COLS + door.c] = 0;
+  if (heardNear(game, door.x, door.y)) game.fx.push('squeak');
+}
+
+function reseatDoors(game, region) {
+  game.doors = (game.doors || []).filter((door) => {
+    const inside = door.c >= region.x && door.r >= region.y && door.c < region.x + region.w && door.r < region.y + region.h;
+    if (inside) return false;
+    return isFloor(game.grid, door.c, door.r);
+  });
+  const blocked = new Set();
+  for (const p of game.players) blocked.add(`${tileOf(p.x, p.y).join(',')}`);
+  if (game.minotaur) blocked.add(`${tileOf(game.minotaur.x, game.minotaur.y).join(',')}`);
+  for (const chest of game.chests) blocked.add(`${chest.c},${chest.r}`);
+  for (const sw of game.switches) blocked.add(`${sw.c},${sw.r}`);
+  for (const gate of game.gates || []) blocked.add(`${gate.c},${gate.r}`);
+  const more = placeDoors(game.grid, game.rng, blocked, region, game.doors);
+  game.doors.push(...more);
+  indexDoors(game);
+}
+
+function forgetBotMemory(game, region) {
+  for (const p of game.players) {
+    if (!p.known) continue;
+    for (let r = region.y; r < region.y + region.h; r++) {
+      for (let c = region.x; c < region.x + region.w; c++) {
+        if (r < 0 || c < 0 || r >= ROWS || c >= COLS) continue;
+        p.known[r * COLS + c] = 0;
+      }
+    }
+  }
+}
+
+function note(game, name) {
+  game.fx.push(name);
+}
+
+function mouthTiles(grid) {
+  const tiles = [];
+  for (let r = 1; r < ROWS - 1; r++) {
+    for (let c = 1; c < COLS - 1; c++) {
+      if (!isFloor(grid, c, r) || inSafeChamber(c, r)) continue;
+      const mouth = DIRS.some(([dc, dr]) => inSafeChamber(c + dc, r + dr) && isFloor(grid, c + dc, r + dr));
+      if (mouth) tiles.push([c, r]);
+    }
+  }
+  return tiles;
+}
+
+function placeSwitches(grid, regions, rng, reserved = new Set()) {
+  const used = new Set(reserved);
   return regions.map((region) => {
     const spot = leverSpot(grid, region, regions, rng, used);
     used.add(`${spot[0]},${spot[1]}`);
@@ -266,7 +440,7 @@ function placeChests(grid, rng, blocked) {
   const other = [];
   for (let r = 1; r < ROWS - 1; r++) {
     for (let c = 1; c < COLS - 1; c++) {
-      if (grid[r][c] !== FLOOR || blocked.has(`${c},${r}`) || inLair(c, r)) continue;
+      if (grid[r][c] !== FLOOR || blocked.has(`${c},${r}`) || inLair(c, r) || inSafeChamber(c, r)) continue;
       let n = 0;
       for (const [dc, dr] of DIRS) if (isFloor(grid, c + dc, r + dr)) n++;
       if (n <= 1) dead.push([c, r]);
@@ -290,9 +464,9 @@ function placeChests(grid, rng, blocked) {
   return chests;
 }
 
-function placeGates(grid) {
-  const west = gateSpot(grid, 2, 7);
-  const east = gateSpot(grid, COLS - 8, COLS - 3);
+function placeGates(grid, reserved = new Set()) {
+  const west = gateSpot(grid, 2, 7, reserved);
+  const east = gateSpot(grid, COLS - 8, COLS - 3, reserved);
   if (!west || !east) return [];
   return [west, east].map((spot, i) => {
     const [x, y] = tileCenter(spot[0], spot[1]);
@@ -300,13 +474,13 @@ function placeGates(grid) {
   });
 }
 
-function gateSpot(grid, c0, c1) {
+function gateSpot(grid, c0, c1, reserved = new Set()) {
   let best = null;
   let bestRow = Infinity;
   const mid = (ROWS / 2) | 0;
   for (let r = 2; r < ROWS - 2; r++) {
     for (let c = c0; c <= c1; c++) {
-      if (!isFloor(grid, c, r)) continue;
+      if (!isFloor(grid, c, r) || reserved.has(`${c},${r}`)) continue;
       const score = Math.abs(r - mid);
       if (score < bestRow) {
         bestRow = score;
@@ -475,10 +649,10 @@ export function pushToast(game, text) {
   if (game.toasts.length > 4) game.toasts.shift();
 }
 
-export function updateMatch(game, intents, dt) {
+export function updateMatch(game, intents, dt, frozen = false) {
   const step = Math.min(Math.max(dt, 0), 0.05);
   decayVisuals(game, step);
-  if (game.phase !== 'play') return;
+  if (frozen || game.phase !== 'play') return;
   game.time += step;
   for (const sw of game.switches) sw.cd = Math.max(0, sw.cd - step);
   game.gateCd = Math.max(0, (game.gateCd || 0) - step);
@@ -525,6 +699,16 @@ function decayVisuals(game, step) {
     p.vy += 28 * step;
   }
   game.particles = game.particles.filter((p) => p.life > 0);
+  for (const door of game.doors || []) {
+    door.ping = Math.max(0, (door.ping || 0) - step);
+    const want = door.open ? 1 : 0;
+    door.leaf = (door.leaf || 0) + (want - (door.leaf || 0)) * Math.min(1, step * 7);
+  }
+  for (const k of game.pickups) if (k.mapT > 0) k.mapT -= step;
+  if (game.callout) {
+    game.callout.life -= step;
+    if (game.callout.life <= 0) game.callout = null;
+  }
 }
 
 function refreshLevers(game) {
@@ -616,10 +800,10 @@ function updatePlayer(game, p, intent, dt) {
     if (p.blocking) speed *= 0.34;
     if (p.swing?.kind === 'charged') speed *= p.class?.chargedMove ?? 0.28;
     else if (p.swing) speed *= p.class?.normalMove ?? 0.55;
-    tryMove(game.grid, p, mx * speed * dt, my * speed * dt);
+    tryMove(game, p, mx * speed * dt, my * speed * dt);
   }
 
-  tryMove(game.grid, p, p.kbx * dt, p.kby * dt);
+  tryMove(game, p, p.kbx * dt, p.kby * dt);
   p.kbx *= Math.exp(-7 * dt);
   p.kby *= Math.exp(-7 * dt);
 
@@ -635,7 +819,7 @@ function respawn(game, p) {
   p.x = x;
   p.y = y;
   p.alive = true;
-  p.hp = Math.round(p.maxHp * 0.62);
+  p.hp = p.maxHp;
   p.invuln = 2.2;
   p.stun = 0;
   p.kbx = 0;
@@ -647,7 +831,7 @@ function respawn(game, p) {
   p.staminaCd = 0;
   burst(game, x, y, p.color, 12, 80);
   floatText(game, x, y - 18, 'Returned', '#efe6d6');
-  game.fx.push('glint');
+  note(game, 'glint', x, y);
 }
 
 function startSwing(game, p, kind) {
@@ -683,7 +867,7 @@ function startSwing(game, p, kind) {
     spent: charged,
   };
   p.attackCd = charged ? (cls?.chargedCd ?? 0.92) : (cls?.normalCd ?? 0.46);
-  game.fx.push(charged ? (cls?.chargedSound || 'charge') : (cls?.normalSound || 'swing'));
+  note(game, charged ? (cls?.chargedSound || 'charge') : (cls?.normalSound || 'swing'), p.x, p.y);
 }
 
 function cancelSwing(p) {
@@ -779,7 +963,7 @@ function updateBolts(game, dt) {
       b.y += b.vy * step;
       b.life -= step;
       const [c, r] = tileOf(b.x, b.y);
-      if (!isFloor(game.grid, c, r)) {
+      if (!isFloor(game.grid, c, r) || game.grid.shut?.[r * COLS + c]) {
         b.life = 0;
         break;
       }
@@ -844,13 +1028,13 @@ function damageGoblin(game, attacker, g, amount, knock, charged = false) {
     attacker.stun = Math.max(attacker.stun || 0, 0.45);
     if (attacker.swing) cancelSwing(attacker);
     floatText(game, g.x, g.y - 16, 'Parry', '#d5e6ff');
-    game.fx.push('clink');
+    note(game, 'clink', g.x, g.y);
     if (attacker.hp != null) hurtPlayer(game, attacker, 10, g.x, g.y, 90, 'contact');
     return;
   }
   if (guard === 'block') {
     floatText(game, g.x, g.y - 16, 'Blocked', '#c5d0dc');
-    game.fx.push('clink');
+    note(game, 'clink', g.x, g.y);
     return;
   }
   const hit = guard === 'break' ? Math.max(1, Math.ceil(amount / 2)) : amount;
@@ -865,7 +1049,7 @@ function damageGoblin(game, attacker, g, amount, knock, charged = false) {
   burst(game, g.x, g.y, attacker.buffs?.fire > 0 ? '#ff9a3c' : '#b6e38a', 8, 70);
   if (g.hp <= 0) killGoblin(game, g, attacker);
   else {
-    game.fx.push('hit');
+    note(game, 'hit', g.x, g.y);
     floatText(game, g.x, g.y - 12, String(hit), '#d7f0b8');
     ignite(game, attacker, g);
     if (attacker.buffs?.boon > 0 && attacker.class?.id === 'thief') g.poison = Math.max(g.poison || 0, 3);
@@ -907,7 +1091,7 @@ function damageMinotaur(game, attacker, charged) {
   if (m.hp <= 0) return;
   if (!charged) {
     floatText(game, m.x, m.y - 20, 'Untouched', '#c8bba6');
-    game.fx.push('clink');
+    note(game, 'clink', m.x, m.y);
     burst(game, m.x, m.y, '#d5d8df', 8, 50);
     return;
   }
@@ -935,7 +1119,7 @@ function damageMinotaur(game, attacker, charged) {
   }
   burst(game, m.x, m.y, '#ffd36a', 16, 110);
   game.shake = Math.max(game.shake, 0.65);
-  game.fx.push('boss');
+  note(game, 'boss', m.x, m.y);
   floatText(game, m.x, m.y - 22, 'Charged', '#ffd36a');
   if (m.hp <= 0) {
     m.hp = 0;
@@ -944,7 +1128,7 @@ function damageMinotaur(game, attacker, charged) {
     game.shake = 1;
     game.flash = 0.9;
     if (attacker) attacker.score = (attacker.score || 0) + 500;
-    game.fx.push('win');
+    note(game, 'win', m.x, m.y);
     floatText(game, m.x, m.y - 36, 'The horn breaks', '#fff4d2');
     pushToast(game, `${verb(attacker?.name || 'Someone', 'land')} the killing blow`);
   }
@@ -976,7 +1160,7 @@ function killGoblin(game, g, killer) {
     revealHunter(killer);
   }
   burst(game, g.x, g.y, '#6fbf62', 12, 80);
-  game.fx.push('pop');
+  note(game, 'pop', g.x, g.y);
   const roll = game.rng();
   let kind = null;
   if (roll < 0.34) kind = 'charge';
@@ -1055,7 +1239,7 @@ function scrambleWing(game, sw, actor) {
   actor.leverTimer = 0;
   for (const p of game.players) p.pathT = 0;
   burst(game, sw.x, sw.y, sw.region.color, 14, 70, 0.5);
-  game.fx.push('lever');
+  note(game, 'lever', sw.x, sw.y);
   pushToast(game, `${verb(actor.name, 'turn')} the ${region.name}`);
 }
 
@@ -1098,6 +1282,8 @@ function tickTurns(game, dt) {
       return isFloor(game.grid, c, r);
     });
     forgetRegion(game, turn.region);
+    forgetBotMemory(game, turn.region);
+    reseatDoors(game, turn.region);
     game.shake = Math.max(game.shake, 0.4);
   }
   game.turns = game.turns.filter((turn) => !turn.applied);
@@ -1162,7 +1348,7 @@ function tickGoblinStrike(game, g, dt) {
     g.strikeT += dt;
     g.fx = g.lx || g.fx;
     g.fy = g.ly || g.fy;
-    tryMove(game.grid, g, g.fx * 220 * dt, g.fy * 220 * dt);
+    tryMove(game, g, g.fx * 220 * dt, g.fy * 220 * dt);
     if (!g.struck && target?.alive) {
       const dx = target.x - g.x;
       const dy = target.y - g.y;
@@ -1194,14 +1380,14 @@ function landGoblinStrike(game, g, target) {
     g.strikeT = 0;
     target.score = (target.score || 0) + 35;
     floatText(game, target.x, target.y - 18, 'Parry', '#d5e6ff');
-    game.fx.push('clink');
+    note(game, 'clink', target.x, target.y);
     return;
   }
   if (guard === 'block') {
     g.strike = 'recover';
     g.strikeT = 0;
     floatText(game, target.x, target.y - 18, 'Blocked', '#d5e6ff');
-    game.fx.push('clink');
+    note(game, 'clink', target.x, target.y);
     return;
   }
   hurtPlayer(game, target, 18, g.x, g.y, 150, 'weapon', null);
@@ -1246,7 +1432,7 @@ function updateGoblins(game, dt) {
       g.kby = 0;
       continue;
     }
-    tryMove(game.grid, g, g.kbx * dt, g.kby * dt);
+    tryMove(game, g, g.kbx * dt, g.kby * dt);
     g.kbx *= Math.exp(-7 * dt);
     g.kby *= Math.exp(-7 * dt);
     if (g.stun > 0) {
@@ -1317,7 +1503,7 @@ function updateGoblins(game, dt) {
         g.fx = dx / len;
         g.fy = dy / len;
         const pace = GOBLIN_SPEED * (g.slow > 0 ? 0.55 : 1) * (g.guard > 0 ? 0.2 : 1);
-        tryMove(game.grid, g, g.fx * pace * dt, g.fy * pace * dt);
+        tryMove(game, g, g.fx * pace * dt, g.fy * pace * dt);
       }
     }
   }
@@ -1356,7 +1542,7 @@ function updateCultists(game, dt) {
       }
     }
     if (cult.carried) continue;
-    tryMove(game.grid, cult, cult.kbx * dt, cult.kby * dt);
+    tryMove(game, cult, cult.kbx * dt, cult.kby * dt);
     cult.kbx *= Math.exp(-7 * dt);
     cult.kby *= Math.exp(-7 * dt);
     if (cult.stun > 0) {
@@ -1437,7 +1623,7 @@ function stepCultist(game, cult, dt) {
   cult.fx = dx / len;
   cult.fy = dy / len;
   const pace = 48 * (cult.slow > 0 ? 0.55 : 1);
-  tryMove(game.grid, cult, cult.fx * pace * dt, cult.fy * pace * dt);
+  tryMove(game, cult, cult.fx * pace * dt, cult.fy * pace * dt);
 }
 
 function spawnFlame(game, cult, prey) {
@@ -1453,7 +1639,7 @@ function spawnFlame(game, cult, prey) {
     life: 1.15,
     radius: 7,
   });
-  game.fx.push('fireball');
+  note(game, 'fireball', cult.x, cult.y);
   burst(game, cult.x, cult.y, '#ff6a2a', 8, 70);
 }
 
@@ -1464,7 +1650,7 @@ function updateFlames(game, dt) {
     flame.y += flame.vy * dt;
     flame.life -= dt;
     const [c, r] = tileOf(flame.x, flame.y);
-    if (!isFloor(game.grid, c, r)) {
+    if (!isFloor(game.grid, c, r) || game.grid.shut?.[r * COLS + c]) {
       flame.life = 0;
       continue;
     }
@@ -1475,7 +1661,7 @@ function updateFlames(game, dt) {
       const guard = hunterGuard(p, fake, false);
       if (guard === 'parry' || guard === 'block') {
         floatText(game, p.x, p.y - 18, guard === 'parry' ? 'Parry' : 'Blocked', '#d5e6ff');
-        game.fx.push('clink');
+        note(game, 'clink', p.x, p.y);
         if (guard === 'parry') p.score = (p.score || 0) + 35;
       } else {
         hurtPlayer(game, p, guard === 'chip' ? 10 : 24, flame.x, flame.y, 150, 'weapon', null);
@@ -1501,7 +1687,7 @@ function damageCultist(game, attacker, cult, amount, knock) {
   burst(game, cult.x, cult.y, '#c4b2ff', 8, 70);
   if (cult.hp <= 0) killCultist(game, cult, attacker);
   else {
-    game.fx.push('hit');
+    note(game, 'hit', cult.x, cult.y);
     floatText(game, cult.x, cult.y - 12, String(amount), '#e6d4ff');
     ignite(game, attacker, cult);
     if (attacker.buffs?.boon > 0 && attacker.class?.id === 'thief') cult.poison = Math.max(cult.poison || 0, 3);
@@ -1519,7 +1705,7 @@ function killCultist(game, cult, killer) {
     revealHunter(killer);
   }
   burst(game, cult.x, cult.y, '#6a4a8a', 14, 90);
-  game.fx.push('pop');
+  note(game, 'pop', cult.x, cult.y);
   const roll = game.rng();
   let kind = null;
   if (roll < 0.55) kind = 'charge';
@@ -1558,7 +1744,8 @@ function updateMinotaur(game, dt) {
   m.cd = Math.max(0, m.cd - dt);
   m.hurtFlash = Math.max(0, m.hurtFlash - dt);
   m.stun = Math.max(0, m.stun - dt);
-  tryMove(game.grid, m, m.kbx * dt, m.kby * dt);
+  m.reveal = Math.max(0, (m.reveal || 0) - dt);
+  tryMove(game, m, m.kbx * dt, m.kby * dt);
   m.kbx *= Math.exp(-6 * dt);
   m.kby *= Math.exp(-6 * dt);
 
@@ -1575,7 +1762,7 @@ function updateMinotaur(game, dt) {
     m.stateT -= dt;
     const beforeX = m.x;
     const beforeY = m.y;
-    tryMove(game.grid, m, m.dx * MINO_CHARGE_SPEED * dt, m.dy * MINO_CHARGE_SPEED * dt);
+    tryMove(game, m, m.dx * MINO_CHARGE_SPEED * dt, m.dy * MINO_CHARGE_SPEED * dt);
     const moved = Math.hypot(m.x - beforeX, m.y - beforeY);
     touchPlayers(game, m, MINO_RAM, 320);
     if (m.stateT <= 0 || moved < MINO_CHARGE_SPEED * dt * 0.18) {
@@ -1585,62 +1772,88 @@ function updateMinotaur(game, dt) {
     return;
   }
 
+  m.lastT = Math.max(0, (m.lastT || 0) - dt);
   m.think -= dt;
   if (m.think <= 0) {
     m.think = 0.34;
     const [sc, sr] = tileOf(m.x, m.y);
-    const distMap = flood(game.grid, sc, sr);
-    let target = living[0];
-    let best = Infinity;
-    for (const p of living) {
-      const [c, r] = tileOf(p.x, p.y);
-      const d = distMap[r * COLS + c];
-      const score = d >= 0 ? d : Math.hypot(p.x - m.x, p.y - m.y) / TILE + 100;
-      if (score < best) {
-        best = score;
-        target = p;
+    const known = living.filter((p) => (p.reveal || 0) > 0 || sees(game.grid, m, p.x, p.y));
+    let target = null;
+    if (known.length) {
+      const distMap = flood(game.grid, sc, sr);
+      let best = Infinity;
+      for (const p of known) {
+        const [c, r] = tileOf(p.x, p.y);
+        const d = distMap[r * COLS + c];
+        const score = d >= 0 ? d : Math.hypot(p.x - m.x, p.y - m.y) / TILE + 100;
+        if (score < best) {
+          best = score;
+          target = p;
+        }
       }
     }
-    m.target = target.index;
-    const dx = target.x - m.x;
-    const dy = target.y - m.y;
-    const dist = Math.hypot(dx, dy) || 1;
-    if (
-      lineOfSight(game.grid, m.x, m.y, target.x, target.y)
-      && dist < 230
-      && dist > 56
-      && m.cd <= 0
-    ) {
-      m.state = 'charge';
-      m.stateT = 0.42;
-      m.dx = dx / dist;
-      m.dy = dy / dist;
-      m.fx = m.dx;
-      m.fy = m.dy;
-      m.cd = 1.25;
-      game.fx.push('horn');
-      game.shake = Math.max(game.shake, 0.4);
-      return;
+    if (target) {
+      m.target = target.index;
+      m.lastX = target.x;
+      m.lastY = target.y;
+      m.lastT = 5;
+      const dx = target.x - m.x;
+      const dy = target.y - m.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      if (
+        lineOfSight(game.grid, m.x, m.y, target.x, target.y)
+        && dist < 230
+        && dist > 56
+        && m.cd <= 0
+      ) {
+        m.state = 'charge';
+        m.stateT = 0.42;
+        m.dx = dx / dist;
+        m.dy = dy / dist;
+        m.fx = m.dx;
+        m.fy = m.dy;
+        m.cd = 1.25;
+        note(game, 'horn', m.x, m.y);
+        game.shake = Math.max(game.shake, 0.4);
+        revealMinotaur(game);
+        return;
+      }
+      const [tc, tr] = tileOf(target.x, target.y);
+      m.step = shortestStep(game.grid, sc, sr, tc, tr);
+    } else if (m.lastT > 0 && m.lastX != null) {
+      m.target = -1;
+      const [tc, tr] = tileOf(m.lastX, m.lastY);
+      m.step = shortestStep(game.grid, sc, sr, tc, tr);
+      if (!m.step || (m.step.c === sc && m.step.r === sr)) m.lastT = 0;
+    } else {
+      m.target = -1;
+      m.roam = (m.roam || 0) - 0.34;
+      const need = !m.step || !isFloor(game.grid, m.step.c, m.step.r) || (m.step.c === sc && m.step.r === sr) || m.roam <= 0;
+      if (need) {
+        m.roam = 0.7 + game.rng() * 0.8;
+        const options = [];
+        for (const [dc, dr] of DIRS) {
+          if (!isFloor(game.grid, sc + dc, sr + dr)) continue;
+          options.push({ c: sc + dc, r: sr + dr, on: dc * (m.fx || 0) + dr * (m.fy || 0) });
+        }
+        options.sort((a, b) => b.on - a.on);
+        const keep = options.filter((step) => step.on > 0.2);
+        const pool = keep.length ? keep : options;
+        m.step = pool.length ? pool[(game.rng() * pool.length) | 0] : null;
+      }
     }
-    const [tc, tr] = tileOf(target.x, target.y);
-    m.step = shortestStep(game.grid, sc, sr, tc, tr);
   }
 
-  const focused = game.players[m.target]?.alive ? game.players[m.target] : living[0];
+  if (!m.step) return;
   const [mc, mr] = tileOf(m.x, m.y);
-  let sx = focused.x;
-  let sy = focused.y;
-  if (m.step && isFloor(game.grid, m.step.c, m.step.r) && (m.step.c !== mc || m.step.r !== mr)) {
-    const center = tileCenter(m.step.c, m.step.r);
-    sx = center[0];
-    sy = center[1];
-  }
-  const dx = sx - m.x;
-  const dy = sy - m.y;
+  if (!isFloor(game.grid, m.step.c, m.step.r) || (m.step.c === mc && m.step.r === mr)) return;
+  const center = tileCenter(m.step.c, m.step.r);
+  const dx = center[0] - m.x;
+  const dy = center[1] - m.y;
   const len = Math.hypot(dx, dy) || 1;
   m.fx = dx / len;
   m.fy = dy / len;
-  tryMove(game.grid, m, m.fx * MINO_SPEED * dt, m.fy * MINO_SPEED * dt);
+  tryMove(game, m, m.fx * MINO_SPEED * dt, m.fy * MINO_SPEED * dt);
   touchPlayers(game, m, MINO_TOUCH, 220);
 }
 
@@ -1649,8 +1862,15 @@ function touchPlayers(game, m, dmg, knock) {
     if (!p.alive || p.invuln > 0 || p.hurtCd > 0) continue;
     if (Math.hypot(p.x - m.x, p.y - m.y) <= m.radius + p.radius + 3) {
       hurtPlayer(game, p, dmg, m.x, m.y, knock);
+      revealMinotaur(game);
     }
   }
+}
+
+function revealMinotaur(game) {
+  const m = game.minotaur;
+  if (!m || m.hp <= 0) return;
+  m.reveal = Math.max(m.reveal || 0, REVEAL_TIME);
 }
 
 function damageHunter(game, attacker, target, amount, knock, charged = false) {
@@ -1661,13 +1881,13 @@ function damageHunter(game, attacker, target, amount, knock, charged = false) {
     if (attacker.swing) cancelSwing(attacker);
     target.score = (target.score || 0) + 35;
     floatText(game, target.x, target.y - 18, 'Parry', '#d5e6ff');
-    game.fx.push('clink');
+    note(game, 'clink', target.x, target.y);
     return;
   }
   let dmg = amount;
   if (guard === 'block') {
     floatText(game, target.x, target.y - 18, 'Blocked', '#d5e6ff');
-    game.fx.push('clink');
+    note(game, 'clink', target.x, target.y);
     return;
   }
   if (guard === 'chip') dmg = Math.max(1, Math.round(amount * 0.4));
@@ -1712,7 +1932,7 @@ function hurtPlayer(game, p, dmg, sx, sy, knock, kind = 'contact', killer = null
   if (p.swing) cancelSwing(p);
   floatText(game, p.x, p.y - 14, String(taken), '#ff8d8d');
   burst(game, p.x, p.y, '#e23d3d', 8, 70);
-  game.fx.push('hurt');
+  note(game, 'hurt', p.x, p.y);
   if (p.hp <= 0) killPlayer(game, p, fromWeapon ? killer : null);
 }
 
@@ -1736,8 +1956,10 @@ function killPlayer(game, p, killer = null) {
       floatText(game, p.x, p.y - 18, stolen === 1 ? 'Charge dropped' : `${stolen} charges`, '#ffd36a');
     }
   }
+  dropHunterLoot(game, p);
   if (game.sword && game.sword.held === p.index) {
     game.sword.held = null;
+    game.sword.dropped = true;
     game.sword.charges = 0;
     game.sword.x = p.x;
     game.sword.y = p.y;
@@ -1748,7 +1970,7 @@ function killPlayer(game, p, killer = null) {
     p.bearing = false;
     floatText(game, game.sword.x, game.sword.y - 34, 'The sword falls', '#ffd36a');
   }
-  game.fx.push('die');
+  note(game, 'die', p.x, p.y);
   pushToast(game, `${verb(p.name, 'fall')}`);
   revealHunter(p);
   if (killer && killer !== p) revealHunter(killer);
@@ -1761,6 +1983,7 @@ function syncSword(game) {
   const holder = game.players[sword.held];
   if (!holder || !holder.alive) {
     sword.held = null;
+    sword.dropped = true;
     return;
   }
   sword.x = holder.x;
@@ -1786,15 +2009,18 @@ function takeSword(game) {
   best.charges += gained;
   sword.charges = 0;
   sword.public = false;
+  sword.dropped = false;
   sword.held = best.index;
   sword.x = best.x;
   sword.y = best.y;
   for (const p of game.players) p.bearing = p === best;
   floatText(game, best.x, best.y - 20, gained ? `Sword +${gained}` : 'The sword', '#ffd36a');
   burst(game, best.x, best.y, '#ffd36a', 12, 70);
-  game.fx.push('glint');
+  note(game, 'glint', best.x, best.y);
   revealHunter(best);
-  pushToast(game, `${verb(best.name, 'take')} the charged sword`);
+  const line = `${verb(best.name, 'take')} the sword`;
+  game.callout = { text: line, life: 2.6, max: 2.6 };
+  pushToast(game, line);
 }
 
 function collect(game) {
@@ -1807,7 +2033,7 @@ function collect(game) {
       chest.open = true;
       grantLoot(game, p, rollChest(game));
       burst(game, chest.x, chest.y, '#ffd36a', 10, 55);
-      game.fx.push('chest');
+      note(game, 'chest', chest.x, chest.y);
     }
     for (const k of game.pickups) {
       if (k.taken) continue;
@@ -1846,21 +2072,55 @@ function separate(game, a, b) {
     dist = 1;
   }
   const push = (min - dist) * 0.5;
-  tryMove(game.grid, a, (-dx / dist) * push, (-dy / dist) * push);
-  tryMove(game.grid, b, (dx / dist) * push, (dy / dist) * push);
+  tryMove(game, a, (-dx / dist) * push, (-dy / dist) * push);
+  tryMove(game, b, (dx / dist) * push, (dy / dist) * push);
 }
 
 function maybeSpawn(game, step) {
   game.spawnT -= step;
-  if (game.spawnT > 0) return;
-  game.spawnT = 18;
-  if (game.goblins.length >= 6) return;
+  if (game.spawnT <= 0) {
+    game.spawnT = 22;
+    if (game.goblins.length < (game.goblinCap || GOBLIN_PACK)) {
+      const spot = spawnAway(game, 6);
+      if (spot) game.goblins.push(makeGoblin(game, spot[0], spot[1]));
+    }
+  }
+  game.cultistSpawnT = (game.cultistSpawnT ?? 34) - step;
+  if (game.cultistSpawnT <= 0) {
+    game.cultistSpawnT = 34;
+    const cultists = game.cultists || (game.cultists = []);
+    if (cultists.length < (game.cultistCap || 3)) {
+      const spot = spawnAway(game, 8);
+      if (spot) cultists.push(makeCultist(game, spot[0], spot[1]));
+    }
+  }
+}
+
+function spawnAway(game, minDist) {
   const avoid = [];
   for (const p of game.players) if (p.alive) avoid.push(tileOf(p.x, p.y));
   if (game.minotaur.hp > 0) avoid.push(tileOf(game.minotaur.x, game.minotaur.y));
-  const spot = findSpot(game.grid, game.rng, avoid, 7, (c, r) => !inLair(c, r));
+  for (const g of game.goblins) avoid.push(tileOf(g.x, g.y));
+  for (const cult of game.cultists || []) avoid.push(tileOf(cult.x, cult.y));
+  return findSpot(game.grid, game.rng, avoid, minDist, (c, r) => !inLair(c, r) && !spawnQuiet(c, r));
+}
+
+function dropHunterLoot(game, p) {
+  const roll = game.rng();
+  const kind = roll < 0.4 ? 'heal' : roll < 0.68 ? 'charge' : roll < 0.86 ? 'fire' : roll < 0.95 ? 'boon' : 'wildfire';
+  const [c, r] = tileOf(p.x, p.y);
+  let spot = isFloor(game.grid, c, r) ? [c, r] : nearestFloorTile(game.grid, c, r);
+  for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [0, 2], [-2, 0], [0, -2]]) {
+    if (isFloor(game.grid, c + dc, r + dr)) {
+      spot = [c + dc, r + dr];
+      break;
+    }
+  }
   if (!spot) return;
-  game.goblins.push(makeGoblin(game, spot[0], spot[1]));
+  const [x, y] = tileCenter(spot[0], spot[1]);
+  game.pickups.push({ x, y, kind, amount: 1, taken: false, mapT: kind === 'charge' ? CHARGE_MAP : 0 });
+  const label = { heal: 'Vigor', charge: 'Charge', fire: 'Fire', boon: 'Boon', wildfire: 'Wildfire' }[kind];
+  floatText(game, x, y - 16, label, '#efe6d6');
 }
 
 function spawnPickup(game, x, y, kind, amount = 1) {
@@ -1868,7 +2128,7 @@ function spawnPickup(game, x, y, kind, amount = 1) {
   const spot = isFloor(game.grid, c, r) ? [c, r] : nearestFloorTile(game.grid, c, r);
   if (!spot) return;
   const [px, py] = tileCenter(spot[0], spot[1]);
-  game.pickups.push({ x: px, y: py, kind, amount, taken: false });
+  game.pickups.push({ x: px, y: py, kind, amount, taken: false, mapT: kind === 'charge' ? CHARGE_MAP : 0 });
 }
 
 function tickDot(game, p, key, dt, dmg, killer) {
@@ -1914,32 +2174,32 @@ function grantLoot(game, p, kind, amount = 1) {
     const before = p.hp;
     p.hp = Math.min(p.maxHp, p.hp + (kind === 'heal' ? 34 : 40));
     if (p.hp > before) floatText(game, p.x, p.y - 18, '+ vigor', '#ff8d8d');
-    game.fx.push('heal');
+    note(game, 'heal', p.x, p.y);
     return;
   }
   if (kind === 'charge') {
     p.charges += amount;
     floatText(game, p.x, p.y - 18, amount > 1 ? `+${amount} charges` : '+ charge', '#ffd36a');
-    game.fx.push('glint');
+    note(game, 'glint', p.x, p.y);
     return;
   }
   if (kind === 'fire') {
     p.buffs.fire = Math.max(p.buffs.fire, 14);
     floatText(game, p.x, p.y - 18, 'Fire sword', '#ff9a3c');
-    game.fx.push('charge');
+    note(game, 'charge', p.x, p.y);
     return;
   }
   if (kind === 'wildfire') {
     p.buffs.fire = Math.max(p.buffs.fire, 14);
     p.buffs.spread = Math.max(p.buffs.spread, 14);
     floatText(game, p.x, p.y - 18, 'Wildfire', '#ff5a2a');
-    game.fx.push('charge');
+    note(game, 'charge', p.x, p.y);
     return;
   }
   if (kind === 'boon') {
     p.buffs.boon = Math.max(p.buffs.boon, 16);
     floatText(game, p.x, p.y - 18, BOONS[p.class?.id] || 'Boon', '#c4b2ff');
-    game.fx.push('glint');
+    note(game, 'glint', p.x, p.y);
   }
 }
 
@@ -1969,7 +2229,7 @@ function tryGate(game, p) {
   game.gateCd = GATE_COOLDOWN;
   burst(game, best.x, best.y, '#7ee0d2', 10, 60);
   burst(game, other.x, other.y, '#7ee0d2', 12, 70);
-  game.fx.push('spell');
+  note(game, 'spell', other.x, other.y);
   floatText(game, other.x, other.y - 18, 'Far side', '#9fd8cf');
   pushToast(game, `${verb(p.name, 'step')} through the maze`);
   return true;
@@ -2012,8 +2272,22 @@ function blocked(grid, x, y, radius) {
   return false;
 }
 
-function tryMove(grid, ent, dx, dy) {
+function tryMove(game, ent, dx, dy) {
   if (!dx && !dy) return;
-  if (dx && !blocked(grid, ent.x + dx, ent.y, ent.radius || 6)) ent.x += dx;
-  if (dy && !blocked(grid, ent.x, ent.y + dy, ent.radius || 6)) ent.y += dy;
+  if (dx && enter(game, ent.x + dx, ent.y, ent.radius || 6)) ent.x += dx;
+  if (dy && enter(game, ent.x, ent.y + dy, ent.radius || 6)) ent.y += dy;
+}
+
+function enter(game, x, y, radius) {
+  const checks = [[0, 0], [radius, 0], [-radius, 0], [0, radius], [0, -radius]];
+  const doors = [];
+  for (const [ox, oy] of checks) {
+    const c = Math.floor((x + ox) / TILE);
+    const r = Math.floor((y + oy) / TILE);
+    if (!isFloor(game.grid, c, r)) return false;
+    const door = doorAt(game, c, r);
+    if (door && !door.open) doors.push(door);
+  }
+  for (const door of doors) openDoor(game, door);
+  return true;
 }

@@ -5,9 +5,13 @@ function index(c, r) {
   return r * COLS + c;
 }
 
-export function flood(grid, sc, sr) {
+function canPass(grid, c, r, pass) {
+  return pass ? pass(grid, c, r) : isFloor(grid, c, r);
+}
+
+export function flood(grid, sc, sr, pass) {
   const dist = new Int16Array(COLS * ROWS).fill(-1);
-  if (!isFloor(grid, sc, sr)) return dist;
+  if (!canPass(grid, sc, sr, pass)) return dist;
   const queue = new Int32Array(COLS * ROWS);
   let head = 0;
   let tail = 0;
@@ -22,7 +26,7 @@ export function flood(grid, sc, sr) {
     for (const [dc, dr] of DIRS) {
       const nc = c + dc;
       const nr = r + dr;
-      if (!isFloor(grid, nc, nr)) continue;
+      if (!canPass(grid, nc, nr, pass)) continue;
       const ni = index(nc, nr);
       if (dist[ni] !== -1) continue;
       dist[ni] = base + 1;
@@ -32,8 +36,8 @@ export function flood(grid, sc, sr) {
   return dist;
 }
 
-export function shortestStep(grid, sc, sr, tc, tr) {
-  if (!isFloor(grid, sc, sr) || !isFloor(grid, tc, tr)) return null;
+export function shortestStep(grid, sc, sr, tc, tr, pass) {
+  if (!canPass(grid, sc, sr, pass) || !canPass(grid, tc, tr, pass)) return null;
   if (sc === tc && sr === tr) return { c: sc, r: sr };
   const prev = new Int32Array(COLS * ROWS).fill(-1);
   const queue = new Int32Array(COLS * ROWS);
@@ -51,7 +55,7 @@ export function shortestStep(grid, sc, sr, tc, tr) {
     for (const [dc, dr] of DIRS) {
       const nc = c + dc;
       const nr = r + dr;
-      if (!isFloor(grid, nc, nr)) continue;
+      if (!canPass(grid, nc, nr, pass)) continue;
       const ni = index(nc, nr);
       if (prev[ni] !== -1) continue;
       prev[ni] = cur;
@@ -68,13 +72,13 @@ export function shortestStep(grid, sc, sr, tc, tr) {
   return { c: cur % COLS, r: (cur / COLS) | 0 };
 }
 
-export function bestStepAway(grid, c, r, tc, tr) {
+export function bestStepAway(grid, c, r, tc, tr, pass) {
   let best = null;
   let score = -Infinity;
   for (const [dc, dr] of DIRS) {
     const nc = c + dc;
     const nr = r + dr;
-    if (!isFloor(grid, nc, nr)) continue;
+    if (!canPass(grid, nc, nr, pass)) continue;
     const s = Math.abs(nc - tc) + Math.abs(nr - tr);
     if (s > score) {
       score = s;
@@ -106,6 +110,7 @@ export function lineOfSight(grid, x0, y0, x1, y1) {
     }
     if (c === c1 && r === r1) return true;
     if (!isFloor(grid, c, r)) return false;
+    if (grid.shut && grid.shut[r * COLS + c]) return false;
   }
   return true;
 }
