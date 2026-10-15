@@ -140,7 +140,7 @@ export function thinkBot(bot, game, dt) {
     const reach = melee
       ? (cls?.normalRange || 36) + quarry.radius + 4
       : (cls?.normalRange || 180) * 0.82;
-    if (los && d <= reach && (bot.stamina ?? 0) >= (cls?.normalStamina ?? 18)) {
+    if (los && d <= reach) {
       faceToward(bot, intent, quarry.x, quarry.y);
       intent.mx = 0;
       intent.my = 0;
@@ -160,7 +160,7 @@ export function thinkBot(bot, game, dt) {
     const los = melee || lineOfSight(game.grid, bot.x, bot.y, horn.x, horn.y);
     if (los && threat < (melee ? 90 : reach + 24)) {
       faceToward(bot, intent, horn.x, horn.y);
-      if (threat < reach && (bot.stamina ?? 0) >= (cls?.chargedStamina ?? 34)) {
+      if (threat < reach) {
         intent.mx = 0;
         intent.my = 0;
         intent.charge = true;
@@ -182,7 +182,7 @@ export function thinkBot(bot, game, dt) {
       const fire = melee
         ? (cls?.normalRange || 36) + gob.radius - 2
         : (cls.normalRange || 180) * 0.8;
-      if (gd < fire && (bot.stamina ?? 0) >= (cls?.normalStamina ?? 18)) {
+      if (gd < fire) {
         intent.mx = 0;
         intent.my = 0;
         intent.attack = true;

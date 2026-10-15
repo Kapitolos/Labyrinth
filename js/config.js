@@ -20,8 +20,8 @@ export const GOBLIN_SPEED = 64;
 export const GOBLIN_RADIUS = 8;
 export const GOBLIN_HP = 2;
 
-export const MINO_SPEED = 108;
-export const MINO_CHARGE_SPEED = 260;
+export const MINO_SPEED = 90;
+export const MINO_CHARGE_SPEED = 220;
 export const MINO_RADIUS = 11;
 export const MINO_HP = 6;
 export const MINO_TOUCH = 72;
@@ -30,6 +30,7 @@ export const MINO_RAM = 120;
 export const LEVER_SIGHT = 96;
 export const LEVER_USE = 52;
 export const LEVER_COOLDOWN = 16;
+export const WING_TURN = 4.2;
 
 export const SWORD_CHARGES = 3;
 export const GATE_COOLDOWN = 10;

@@ -16,6 +16,7 @@ const view = { w: 800, h: 600, dpr: 1 };
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const held = new Set();
 const edges = new Set();
+let clickAttack = false;
 const padPrev = [[], [], [], []];
 
 const blockedKeys = new Set([
@@ -59,8 +60,15 @@ window.addEventListener('keyup', (event) => held.delete(event.code));
 window.addEventListener('blur', () => {
   held.clear();
   edges.clear();
+  clickAttack = false;
 });
-window.addEventListener('pointerdown', () => audio.unlock());
+window.addEventListener('pointerdown', (event) => {
+  audio.unlock();
+  if (event.button !== 0 || mode !== 'play') return;
+  const el = event.target;
+  if (!(el instanceof Element) || el.closest('button, a, input, textarea, select')) return;
+  clickAttack = true;
+});
 
 document.getElementById('mute').addEventListener('click', toggleMute);
 document.getElementById('resume').addEventListener('click', () => setMode('play'));
@@ -98,6 +106,7 @@ function frame(now) {
     const intents = mode === 'play'
       ? game.players.map((p, i) => (p.bot ? thinkBot(p, game, dt) : humanIntent(p, i)))
       : game.players.map(() => ({ mx: 0, my: 0, attack: false, charge: false, use: false }));
+    clickAttack = false;
     updateMatch(game, intents, dt);
     updateCamera(camera, game, view, held.has('KeyZ'), dt);
     if (game.phase === 'victory' && mode === 'play') showEnd();
@@ -131,7 +140,7 @@ function humanIntent(player, index) {
   return {
     mx,
     my,
-    attack: edges.has(bind.attack) || Boolean(pad?.attack),
+    attack: edges.has(bind.attack) || Boolean(pad?.attack) || (index === 0 && clickAttack),
     charge: edges.has(bind.charge) || Boolean(pad?.charge),
     use: edges.has(bind.use) || Boolean(pad?.use),
     block: held.has(bind.block) || Boolean(pad?.block),

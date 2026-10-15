@@ -3,6 +3,7 @@ import {
   PLAYER_SPEED, PLAYER_RADIUS,
   GOBLIN_SPEED, GOBLIN_RADIUS, GOBLIN_HP,
   MINO_SPEED, MINO_CHARGE_SPEED, MINO_RADIUS, MINO_HP, MINO_TOUCH, MINO_RAM,
+  WING_TURN,
   LEVER_SIGHT, LEVER_USE, LEVER_COOLDOWN,
   SWORD_CHARGES, GATE_COOLDOWN,
   NORMAL_RANGE, CHARGED_RANGE, NORMAL_CONE, CHARGED_CONE,
@@ -44,6 +45,7 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
     goblins,
     pickups: [],
     bolts: [],
+    turns: [],
     particles: [],
     texts: [],
     toasts: [],
@@ -91,7 +93,7 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
       staminaCd: 0,
       blocking: false,
       blockAge: 0,
-      charges: 0,
+      charges: 1,
       score: 0,
       bearing: false,
       buffs: { fire: 0, spread: 0, boon: 0 },
@@ -390,7 +392,7 @@ export function leverReadout(game) {
     let action;
     if (best.cd > 0) action = `Jammed for ${Math.ceil(best.cd)}s.`;
     else if (bestD > LEVER_USE) action = 'Step closer to throw it.';
-    else action = `${p.bind.useName} — scramble this wing.`;
+    else action = `${p.bind.useName} — turn this wing.`;
     const who = game.humanCount > 1 ? `${p.name}: ` : '';
     lines.push(`${who}${best.region.name}. ${describeWing(game, best, p)} ${action}`);
   }
@@ -460,6 +462,7 @@ export function updateMatch(game, intents, dt) {
     separateAll(game);
     maybeSpawn(game, step);
   }
+  tickTurns(game, step);
   refreshLevers(game);
 }
 
@@ -523,6 +526,11 @@ function updatePlayer(game, p, intent, dt) {
     return;
   }
 
+  if (p.carried) {
+    if (p.swing) cancelSwing(p);
+    return;
+  }
+
   if (p.stun > 0) {
     if (p.swing) cancelSwing(p);
     p.blocking = false;
@@ -555,6 +563,7 @@ function updatePlayer(game, p, intent, dt) {
       else if (intent.attack) startSwing(game, p, 'normal');
     }
     const running = Boolean(intent.sprint) && (mx || my) && !p.blocking && !p.swing && p.stamina > 0;
+    if (mx || my) p.gait = (p.gait || 0) + dt * (running ? 14 : 9);
     if (running) p.stamina = Math.max(0, p.stamina - 42 * dt);
     else if (!p.blocking && p.staminaCd <= 0) {
       const regen = p.class?.staminaRegen ?? 20;
@@ -613,13 +622,6 @@ function startSwing(game, p, kind) {
   }
   const charged = kind === 'charged';
   const cls = p.class;
-  const cost = charged ? (cls?.chargedStamina ?? 34) : (cls?.normalStamina ?? 18);
-  if ((p.stamina ?? 0) < cost) {
-    if (!p.bot) floatText(game, p.x, p.y - 18, 'Winded', '#d7c48a');
-    return;
-  }
-  p.stamina -= cost;
-  p.staminaCd = 0.42;
   if (charged) {
     p.charges -= 1;
     p.chargesSpent += 1;
@@ -649,7 +651,6 @@ function cancelSwing(p) {
   if (s.spent && s.kind === 'charged' && !s.connected && s.age < s.duration * 0.4) {
     p.charges += 1;
     p.chargesSpent = Math.max(0, p.chargesSpent - 1);
-    p.stamina = Math.min(p.staminaMax || 100, (p.stamina || 0) + (p.class?.chargedStamina ?? 34));
     s.spent = false;
   }
   p.swing = null;
@@ -912,11 +913,15 @@ function killGoblin(game, g, killer) {
   burst(game, g.x, g.y, '#6fbf62', 12, 80);
   game.fx.push('pop');
   const roll = game.rng();
-  if (roll < 0.22) spawnPickup(game, g.x, g.y, 'heal');
-  else if (roll < 0.34) spawnPickup(game, g.x, g.y, 'charge');
-  else if (roll < 0.46) spawnPickup(game, g.x, g.y, 'fire');
-  else if (roll < 0.54) spawnPickup(game, g.x, g.y, 'boon');
-  else if (roll < 0.6) spawnPickup(game, g.x, g.y, 'wildfire');
+  let kind = null;
+  if (roll < 0.34) kind = 'charge';
+  else if (roll < 0.5) kind = 'heal';
+  else if (roll < 0.6) kind = 'fire';
+  else if (roll < 0.68) kind = 'boon';
+  else if (roll < 0.74) kind = 'wildfire';
+  if (!kind) return;
+  spawnPickup(game, g.x, g.y, kind);
+  if (kind === 'charge') floatText(game, g.x, g.y - 16, 'Charge', '#ffd36a');
 }
 
 function tryUse(game, p) {
@@ -940,48 +945,110 @@ function tryUse(game, p) {
 
 function scrambleWing(game, sw, actor) {
   const region = sw.region;
-  scrambleRegion(game.grid, region, game.rng, new Set());
+  if ((game.turns || []).some((turn) => turn.region === region)) return;
+  const base = game.turns.length ? game.turns[game.turns.length - 1].next : game.grid;
+  const next = base.map((row) => row.slice());
+  scrambleRegion(next, region, game.rng, new Set());
+  const turn = {
+    region,
+    next,
+    age: 0,
+    duration: WING_TURN,
+    angle: 0,
+    riders: [],
+    applied: false,
+  };
+  const ride = (ent) => {
+    if (!ent || ent.alive === false || ent.carried) return;
+    if (!pointInRegion(ent.x, ent.y, region)) return;
+    ent.carried = true;
+    ent.kbx = 0;
+    ent.kby = 0;
+    if (ent.swing) cancelSwing(ent);
+    if (ent.state === 'charge') {
+      ent.state = 'recover';
+      ent.stateT = 0.4;
+    }
+    turn.riders.push(ent);
+  };
+  for (const p of game.players) if (p.alive) ride(p);
+  for (const g of game.goblins) ride(g);
+  ride(game.minotaur);
+  for (const chest of game.chests) ride(chest);
+  for (const pickup of game.pickups) ride(pickup);
+  if (game.sword && game.sword.held == null) ride(game.sword);
+  game.turns.push(turn);
   sw.cd = LEVER_COOLDOWN;
-  sw.flash = 0.75;
+  sw.flash = WING_TURN;
   sw.telegraph = 0;
   sw.telegraphName = '';
   actor.levers += 1;
   actor.score = (actor.score || 0) + 25;
   actor.telegraphSwitchId = null;
   actor.leverTimer = 0;
-
-  const bump = (ent, minotaur) => {
-    if (!ent || (ent.alive === false)) return;
-    if (!pointInRegion(ent.x, ent.y, region)) return;
-    ent.stun = Math.max(ent.stun || 0, 0.55);
-    if (ent.swing) cancelSwing(ent);
-    if (minotaur) {
-      ent.state = 'recover';
-      ent.stateT = Math.max(ent.stateT || 0, 0.55);
-    }
-  };
-  for (const p of game.players) if (p.alive) bump(p, false);
-  for (const g of game.goblins) bump(g, false);
-  bump(game.minotaur, true);
-
-  for (const p of game.players) ensureFloor(game.grid, p);
-  for (const g of game.goblins) ensureFloor(game.grid, g);
-  ensureFloor(game.grid, game.minotaur);
-  for (const chest of game.chests) ensureFloor(game.grid, chest);
-  for (const pickup of game.pickups) ensureFloor(game.grid, pickup);
-  for (const other of game.switches) ensureFloor(game.grid, other);
-  if (game.sword && game.sword.held == null) ensureFloor(game.grid, game.sword);
-  for (const gate of game.gates || []) ensureFloor(game.grid, gate);
-  game.bolts = game.bolts.filter((b) => {
-    const [c, r] = tileOf(b.x, b.y);
-    return isFloor(game.grid, c, r);
-  });
-
   for (const p of game.players) p.pathT = 0;
-  game.shake = Math.max(game.shake, 1);
-  burst(game, sw.x, sw.y, sw.region.color, 18, 120, 0.6);
+  burst(game, sw.x, sw.y, sw.region.color, 14, 70, 0.5);
   game.fx.push('lever');
-  pushToast(game, `${verb(actor.name, 'scramble')} the ${region.name}`);
+  pushToast(game, `${verb(actor.name, 'turn')} the ${region.name}`);
+}
+
+function tickTurns(game, dt) {
+  for (const turn of game.turns) {
+    const prev = turn.angle;
+    turn.age += dt;
+    const u = Math.min(1, turn.age / turn.duration);
+    const eased = u < 0.5 ? 2 * u * u : 1 - ((-2 * u + 2) ** 2) / 2;
+    turn.angle = eased * Math.PI;
+    const step = turn.angle - prev;
+    if (step) spinRiders(turn, step);
+    if (u < 1 || turn.applied) continue;
+    turn.applied = true;
+    game.grid = turn.next;
+    const settle = (ent) => {
+      if (!ent) return;
+      ent.carried = false;
+      ent.kbx = 0;
+      ent.kby = 0;
+      if (ent.stun != null) ent.stun = Math.max(ent.stun || 0, 0.3);
+      ensureFloor(game.grid, ent);
+    };
+    for (const ent of turn.riders) settle(ent);
+    for (const p of game.players) ensureFloor(game.grid, p);
+    for (const g of game.goblins) ensureFloor(game.grid, g);
+    ensureFloor(game.grid, game.minotaur);
+    for (const chest of game.chests) ensureFloor(game.grid, chest);
+    for (const pickup of game.pickups) ensureFloor(game.grid, pickup);
+    for (const sw of game.switches) ensureFloor(game.grid, sw);
+    if (game.sword && game.sword.held == null) ensureFloor(game.grid, game.sword);
+    for (const gate of game.gates || []) ensureFloor(game.grid, gate);
+    game.bolts = game.bolts.filter((b) => {
+      const [c, r] = tileOf(b.x, b.y);
+      return isFloor(game.grid, c, r);
+    });
+    game.shake = Math.max(game.shake, 0.4);
+  }
+  game.turns = game.turns.filter((turn) => !turn.applied);
+  syncSword(game);
+}
+
+function spinRiders(turn, angle) {
+  const reg = turn.region;
+  const cx = (reg.x + reg.w / 2) * TILE;
+  const cy = (reg.y + reg.h / 2) * TILE;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  for (const ent of turn.riders) {
+    if (!ent) continue;
+    const dx = ent.x - cx;
+    const dy = ent.y - cy;
+    ent.x = cx + dx * cos - dy * sin;
+    ent.y = cy + dx * sin + dy * cos;
+    if (ent.fx == null) continue;
+    const fx = ent.fx || 0;
+    const fy = ent.fy || 0;
+    ent.fx = fx * cos - fy * sin;
+    ent.fy = fx * sin + fy * cos;
+  }
 }
 
 function ensureFloor(grid, ent) {
@@ -1101,6 +1168,11 @@ function updateGoblins(game, dt) {
         }
       }
     }
+    if (g.carried) {
+      g.kbx = 0;
+      g.kby = 0;
+      continue;
+    }
     tryMove(game.grid, g, g.kbx * dt, g.kby * dt);
     g.kbx *= Math.exp(-7 * dt);
     g.kby *= Math.exp(-7 * dt);
@@ -1198,6 +1270,7 @@ function bestAway(grid, c, r, tc, tr) {
 function updateMinotaur(game, dt) {
   const m = game.minotaur;
   if (m.hp <= 0) return;
+  if (m.carried) return;
   m.cd = Math.max(0, m.cd - dt);
   m.hurtFlash = Math.max(0, m.hurtFlash - dt);
   m.stun = Math.max(0, m.stun - dt);
