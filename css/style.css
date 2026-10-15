@@ -239,10 +239,15 @@ body {
   z-index: 6;
   overflow: auto;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: safe center;
+  justify-content: safe center;
   padding: 28px 16px;
   background: rgba(8, 7, 6, 0.72);
+}
+
+#menu.overlay {
+  align-items: flex-start;
+  justify-content: center;
 }
 
 .hidden,

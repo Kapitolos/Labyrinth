@@ -16,8 +16,13 @@ export function createAudio() {
       else if (name === 'arrow') tone(ac, t, 640, 0.06, 'square', 0.03, -280);
       else if (name === 'spell') tone(ac, t, 420, 0.12, 'sine', 0.04, 260);
       else if (name === 'charge') {
-        tone(ac, t, 180, 0.16, 'sawtooth', 0.035, 460);
-        tone(ac, t, 540, 0.12, 'triangle', 0.03, 180);
+        tone(ac, t, 55, 0.55, 'sawtooth', 0.11, -20);
+        tone(ac, t, 110, 0.42, 'square', 0.07, 70);
+        tone(ac, t, 220, 0.28, 'triangle', 0.06, 180);
+        tone(ac, t + 0.04, 440, 0.18, 'sawtooth', 0.04, 260);
+      } else if (name === 'fireball') {
+        tone(ac, t, 160, 0.28, 'sawtooth', 0.05, 90);
+        tone(ac, t, 420, 0.2, 'square', 0.03, -180);
       } else if (name === 'clink') tone(ac, t, 640, 0.05, 'square', 0.025, -200);
       else if (name === 'hit') tone(ac, t, 160, 0.08, 'triangle', 0.04, -40);
       else if (name === 'boss') {

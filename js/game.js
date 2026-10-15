@@ -16,6 +16,7 @@ import {
   scrambleRegion, isFloor, nearestFloorTile, pointInRegion,
 } from './maze.js';
 import { flood, shortestStep, lineOfSight } from './path.js';
+import { refreshVision, forgetRegion, REVEAL_TIME } from './vision.js';
 
 function classFor(index, classIds) {
   const id = classIds && classIds[index];
@@ -115,6 +116,7 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
       chargesSpent: 0,
       bossHits: 0,
       levers: 0,
+      reveal: 0,
       prevX: x,
       prevY: y,
       wasMoving: false,
@@ -130,7 +132,7 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
   }
 
   const [sx, sy] = tileCenter(lc, lr);
-  game.sword = { x: sx, y: sy, c: lc, r: lr, held: null, radius: 8, charges: SWORD_CHARGES };
+  game.sword = { x: sx, y: sy, c: lc, r: lr, held: null, radius: 8, charges: SWORD_CHARGES, public: true };
   game.gates = placeGates(grid);
   game.gateCd = 0;
   const [mx, my] = tileCenter(lc, lr + 1);
@@ -168,6 +170,16 @@ export function createMatch(humanCount, rng = Math.random, classIds = null) {
     game.goblins.push(makeGoblin(game, spot[0], spot[1]));
   }
 
+  game.cultists = [];
+  game.flames = [];
+  for (let n = 0; n < 3; n++) {
+    const spot = findSpot(grid, rng, avoid, 8, (c, r) => !inLair(c, r));
+    if (!spot) break;
+    avoid.push(spot);
+    game.cultists.push(makeCultist(game, spot[0], spot[1]));
+  }
+
+  refreshVision(game);
   return game;
 }
 
@@ -366,6 +378,31 @@ function makeGoblin(game, c, r) {
   };
 }
 
+function makeCultist(game, c, r) {
+  const [x, y] = tileCenter(c, r);
+  return {
+    id: `c${game.nextId++}`,
+    x, y,
+    fx: 1,
+    fy: 0,
+    hp: 3,
+    radius: 8,
+    alive: true,
+    stun: 0,
+    kbx: 0,
+    kby: 0,
+    think: game.rng() * 0.4,
+    step: null,
+    cast: null,
+    castT: 0,
+    castCd: 0.6 + game.rng() * 0.8,
+    castWho: -1,
+    burn: 0,
+    slow: 0,
+    poison: 0,
+  };
+}
+
 export function occupantsOf(game, region) {
   return {
     players: game.players.filter((p) => p.alive && pointInRegion(p.x, p.y, region)),
@@ -457,13 +494,16 @@ export function updateMatch(game, intents, dt) {
   }
   if (game.phase === 'play') {
     updateGoblins(game, step);
+    updateCultists(game, step);
     updateMinotaur(game, step);
+    updateFlames(game, step);
     collect(game);
     separateAll(game);
     maybeSpawn(game, step);
   }
   tickTurns(game, step);
   refreshLevers(game);
+  refreshVision(game);
 }
 
 function decayVisuals(game, step) {
@@ -517,6 +557,7 @@ function updatePlayer(game, p, intent, dt) {
     tickDot(game, p, 'poison', dt, 4, p.poisoner);
   }
   p.stun = Math.max(0, p.stun - dt);
+  p.reveal = Math.max(0, (p.reveal || 0) - dt);
   p.invuln = Math.max(0, p.invuln - dt);
   p.staminaCd = Math.max(0, (p.staminaCd || 0) - dt);
 
@@ -680,6 +721,13 @@ function resolveSwing(game, p) {
     s.connected = true;
     damageGoblin(game, p, g, amount, 170, s.kind === 'charged');
   }
+  for (const cult of game.cultists || []) {
+    if (!cult.alive || s.hit.has(cult.id)) continue;
+    if (!inCone(game.grid, p, s, cult)) continue;
+    s.hit.add(cult.id);
+    s.connected = true;
+    damageCultist(game, p, cult, amount, 170);
+  }
 
   const hunterHit = s.kind === 'charged'
     ? (p.class?.chargedHunter ?? 48)
@@ -743,6 +791,12 @@ function updateBolts(game, dt) {
         if (dist > g.radius + b.radius) continue;
         struck.push({ dist, kind: 'goblin', ent: g });
       }
+      for (const cult of game.cultists || []) {
+        if (!cult.alive || b.hit.has(cult.id)) continue;
+        const dist = Math.hypot(cult.x - b.x, cult.y - b.y);
+        if (dist > cult.radius + b.radius) continue;
+        struck.push({ dist, kind: 'cultist', ent: cult });
+      }
       for (const other of game.players) {
         if (!other.alive || other.invuln > 0 || other.index === b.owner || b.hit.has(other.index)) continue;
         const dist = Math.hypot(other.x - b.x, other.y - b.y);
@@ -755,6 +809,9 @@ function updateBolts(game, dt) {
         if (hit.kind === 'goblin') {
           b.hit.add(hit.ent.id);
           damageGoblin(game, owner, hit.ent, b.damage, 140, b.charged);
+        } else if (hit.kind === 'cultist') {
+          b.hit.add(hit.ent.id);
+          damageCultist(game, owner, hit.ent, b.damage, 140);
         } else {
           b.hit.add(hit.ent.index);
           damageHunter(game, owner, hit.ent, b.hunterDamage, 120, b.charged);
@@ -869,6 +926,13 @@ function damageMinotaur(game, attacker, charged) {
     m.state = 'recover';
     m.stateT = 0.4;
   }
+  revealHunter(attacker);
+  if (m.hp > 0 && game.rng() < 0.45) {
+    m.stun = Math.max(m.stun || 0, 0.7);
+    m.state = 'recover';
+    m.stateT = Math.max(m.stateT || 0, 0.7);
+    floatText(game, m.x, m.y - 36, 'Stunned', '#d5e6ff');
+  }
   burst(game, m.x, m.y, '#ffd36a', 16, 110);
   game.shake = Math.max(game.shake, 0.65);
   game.fx.push('boss');
@@ -909,6 +973,7 @@ function killGoblin(game, g, killer) {
   if (killer) {
     killer.goblinsSlain += 1;
     killer.score = (killer.score || 0) + 50;
+    revealHunter(killer);
   }
   burst(game, g.x, g.y, '#6fbf62', 12, 80);
   game.fx.push('pop');
@@ -973,6 +1038,7 @@ function scrambleWing(game, sw, actor) {
   };
   for (const p of game.players) if (p.alive) ride(p);
   for (const g of game.goblins) ride(g);
+  for (const cult of game.cultists || []) ride(cult);
   ride(game.minotaur);
   for (const chest of game.chests) ride(chest);
   for (const pickup of game.pickups) ride(pickup);
@@ -984,6 +1050,7 @@ function scrambleWing(game, sw, actor) {
   sw.telegraphName = '';
   actor.levers += 1;
   actor.score = (actor.score || 0) + 25;
+  revealHunter(actor);
   actor.telegraphSwitchId = null;
   actor.leverTimer = 0;
   for (const p of game.players) p.pathT = 0;
@@ -1015,6 +1082,7 @@ function tickTurns(game, dt) {
     for (const ent of turn.riders) settle(ent);
     for (const p of game.players) ensureFloor(game.grid, p);
     for (const g of game.goblins) ensureFloor(game.grid, g);
+    for (const cult of game.cultists || []) ensureFloor(game.grid, cult);
     ensureFloor(game.grid, game.minotaur);
     for (const chest of game.chests) ensureFloor(game.grid, chest);
     for (const pickup of game.pickups) ensureFloor(game.grid, pickup);
@@ -1025,6 +1093,11 @@ function tickTurns(game, dt) {
       const [c, r] = tileOf(b.x, b.y);
       return isFloor(game.grid, c, r);
     });
+    game.flames = (game.flames || []).filter((b) => {
+      const [c, r] = tileOf(b.x, b.y);
+      return isFloor(game.grid, c, r);
+    });
+    forgetRegion(game, turn.region);
     game.shake = Math.max(game.shake, 0.4);
   }
   game.turns = game.turns.filter((turn) => !turn.applied);
@@ -1201,7 +1274,7 @@ function updateGoblins(game, dt) {
         for (const p of game.players) {
           if (!p.alive) continue;
           const d = Math.hypot(p.x - g.x, p.y - g.y);
-          if (d < best) {
+          if (d < best && lineOfSight(game.grid, g.x, g.y, p.x, p.y)) {
             best = d;
             target = p;
           }
@@ -1249,6 +1322,217 @@ function updateGoblins(game, dt) {
     }
   }
   game.goblins = game.goblins.filter((g) => g.alive);
+}
+
+function updateCultists(game, dt) {
+  const m = game.minotaur;
+  for (const cult of game.cultists || []) {
+    if (!cult.alive) continue;
+    cult.stun = Math.max(0, cult.stun - dt);
+    cult.slow = Math.max(0, (cult.slow || 0) - dt);
+    cult.castCd = Math.max(0, (cult.castCd || 0) - dt);
+    if ((cult.burn || 0) > 0) {
+      cult.burn -= dt;
+      cult.burnAcc = (cult.burnAcc || 0) + dt;
+      if (cult.burnAcc >= 0.5) {
+        cult.burnAcc = 0;
+        cult.hp -= 4;
+        if (cult.hp <= 0) {
+          killCultist(game, cult, cult.burner || null);
+          continue;
+        }
+      }
+    }
+    if ((cult.poison || 0) > 0) {
+      cult.poison -= dt;
+      cult.poisonAcc = (cult.poisonAcc || 0) + dt;
+      if (cult.poisonAcc >= 0.5) {
+        cult.poisonAcc = 0;
+        cult.hp -= 3;
+        if (cult.hp <= 0) {
+          killCultist(game, cult, null);
+          continue;
+        }
+      }
+    }
+    if (cult.carried) continue;
+    tryMove(game.grid, cult, cult.kbx * dt, cult.kby * dt);
+    cult.kbx *= Math.exp(-7 * dt);
+    cult.kby *= Math.exp(-7 * dt);
+    if (cult.stun > 0) {
+      cult.cast = null;
+      continue;
+    }
+    if (cult.cast === 'windup') {
+      cult.castT += dt;
+      const prey = game.players[cult.castWho];
+      if (!prey || !prey.alive || Math.hypot(prey.x - cult.x, prey.y - cult.y) > 280) {
+        cult.cast = null;
+        cult.castCd = 0.45;
+        continue;
+      }
+      const aim = Math.hypot(prey.x - cult.x, prey.y - cult.y) || 1;
+      cult.fx = (prey.x - cult.x) / aim;
+      cult.fy = (prey.y - cult.y) / aim;
+      if (cult.castT >= 0.7) {
+        cult.cast = null;
+        cult.castCd = 2.3;
+        spawnFlame(game, cult, prey);
+      }
+      continue;
+    }
+    cult.think -= dt;
+    if (cult.think > 0) {
+      stepCultist(game, cult, dt);
+      continue;
+    }
+    cult.think = 0.38 + game.rng() * 0.25;
+    const [c, r] = tileOf(cult.x, cult.y);
+    const md = Math.hypot(cult.x - m.x, cult.y - m.y);
+    if (md < 90 && m.hp > 0) {
+      const [mc, mr] = tileOf(m.x, m.y);
+      cult.step = bestAway(game.grid, c, r, mc, mr);
+    } else {
+      let target = null;
+      let best = 240;
+      for (const p of game.players) {
+        if (!p.alive) continue;
+        const d = Math.hypot(p.x - cult.x, p.y - cult.y);
+        if (d < best && lineOfSight(game.grid, cult.x, cult.y, p.x, p.y)) {
+          best = d;
+          target = p;
+        }
+      }
+      if (target && cult.castCd <= 0 && best < 210) {
+        cult.cast = 'windup';
+        cult.castT = 0;
+        cult.castWho = target.index;
+        cult.step = null;
+        const aim = Math.hypot(target.x - cult.x, target.y - cult.y) || 1;
+        cult.fx = (target.x - cult.x) / aim;
+        cult.fy = (target.y - cult.y) / aim;
+      } else if (target) {
+        const [tc, tr] = tileOf(target.x, target.y);
+        cult.step = shortestStep(game.grid, c, r, tc, tr);
+      } else {
+        const options = [];
+        for (const [dc, dr] of DIRS) {
+          if (isFloor(game.grid, c + dc, r + dr)) options.push({ c: c + dc, r: r + dr });
+        }
+        cult.step = options.length ? options[(game.rng() * options.length) | 0] : null;
+      }
+    }
+    stepCultist(game, cult, dt);
+  }
+  game.cultists = (game.cultists || []).filter((cult) => cult.alive);
+}
+
+function stepCultist(game, cult, dt) {
+  if (cult.cast === 'windup' || !cult.step || !isFloor(game.grid, cult.step.c, cult.step.r)) return;
+  const [x, y] = tileCenter(cult.step.c, cult.step.r);
+  const dx = x - cult.x;
+  const dy = y - cult.y;
+  const len = Math.hypot(dx, dy) || 1;
+  if (len <= 3) return;
+  cult.fx = dx / len;
+  cult.fy = dy / len;
+  const pace = 48 * (cult.slow > 0 ? 0.55 : 1);
+  tryMove(game.grid, cult, cult.fx * pace * dt, cult.fy * pace * dt);
+}
+
+function spawnFlame(game, cult, prey) {
+  const dx = prey.x - cult.x;
+  const dy = prey.y - cult.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const speed = 210;
+  game.flames.push({
+    x: cult.x + (dx / len) * 14,
+    y: cult.y + (dy / len) * 14,
+    vx: (dx / len) * speed,
+    vy: (dy / len) * speed,
+    life: 1.15,
+    radius: 7,
+  });
+  game.fx.push('fireball');
+  burst(game, cult.x, cult.y, '#ff6a2a', 8, 70);
+}
+
+function updateFlames(game, dt) {
+  for (const flame of game.flames || []) {
+    if (flame.life <= 0 || game.phase !== 'play') continue;
+    flame.x += flame.vx * dt;
+    flame.y += flame.vy * dt;
+    flame.life -= dt;
+    const [c, r] = tileOf(flame.x, flame.y);
+    if (!isFloor(game.grid, c, r)) {
+      flame.life = 0;
+      continue;
+    }
+    for (const p of game.players) {
+      if (!p.alive || p.invuln > 0) continue;
+      if (Math.hypot(p.x - flame.x, p.y - flame.y) > p.radius + flame.radius) continue;
+      const fake = { x: flame.x, y: flame.y, class: { id: 'wizard' } };
+      const guard = hunterGuard(p, fake, false);
+      if (guard === 'parry' || guard === 'block') {
+        floatText(game, p.x, p.y - 18, guard === 'parry' ? 'Parry' : 'Blocked', '#d5e6ff');
+        game.fx.push('clink');
+        if (guard === 'parry') p.score = (p.score || 0) + 35;
+      } else {
+        hurtPlayer(game, p, guard === 'chip' ? 10 : 24, flame.x, flame.y, 150, 'weapon', null);
+      }
+      flame.life = 0;
+      burst(game, flame.x, flame.y, '#ff9a3c', 10, 80);
+      break;
+    }
+  }
+  game.flames = (game.flames || []).filter((flame) => flame.life > 0);
+}
+
+function damageCultist(game, attacker, cult, amount, knock) {
+  if (!cult.alive || !attacker) return;
+  const dx = cult.x - attacker.x;
+  const dy = cult.y - attacker.y;
+  const d = Math.hypot(dx, dy) || 1;
+  cult.kbx = (dx / d) * knock;
+  cult.kby = (dy / d) * knock;
+  cult.stun = Math.max(cult.stun, 0.12);
+  cult.cast = null;
+  cult.hp -= amount;
+  burst(game, cult.x, cult.y, '#c4b2ff', 8, 70);
+  if (cult.hp <= 0) killCultist(game, cult, attacker);
+  else {
+    game.fx.push('hit');
+    floatText(game, cult.x, cult.y - 12, String(amount), '#e6d4ff');
+    ignite(game, attacker, cult);
+    if (attacker.buffs?.boon > 0 && attacker.class?.id === 'thief') cult.poison = Math.max(cult.poison || 0, 3);
+    if (attacker.buffs?.boon > 0 && attacker.class?.id === 'wizard') cult.slow = Math.max(cult.slow || 0, 2.2);
+  }
+}
+
+function killCultist(game, cult, killer) {
+  if (!cult.alive) return;
+  cult.alive = false;
+  cult.hp = 0;
+  if (killer) {
+    killer.goblinsSlain += 1;
+    killer.score = (killer.score || 0) + 80;
+    revealHunter(killer);
+  }
+  burst(game, cult.x, cult.y, '#6a4a8a', 14, 90);
+  game.fx.push('pop');
+  const roll = game.rng();
+  let kind = null;
+  if (roll < 0.55) kind = 'charge';
+  else if (roll < 0.72) kind = 'fire';
+  else if (roll < 0.84) kind = 'heal';
+  if (!kind) return;
+  spawnPickup(game, cult.x, cult.y, kind);
+  if (kind === 'charge') floatText(game, cult.x, cult.y - 16, 'Charge', '#ffd36a');
+}
+
+function revealHunter(p) {
+  if (!p || p.reveal == null) return;
+  p.reveal = Math.max(p.reveal || 0, REVEAL_TIME);
 }
 
 function bestAway(grid, c, r, tc, tr) {
@@ -1466,6 +1750,8 @@ function killPlayer(game, p, killer = null) {
   }
   game.fx.push('die');
   pushToast(game, `${verb(p.name, 'fall')}`);
+  revealHunter(p);
+  if (killer && killer !== p) revealHunter(killer);
 }
 
 function syncSword(game) {
@@ -1499,6 +1785,7 @@ function takeSword(game) {
   const gained = sword.charges || 0;
   best.charges += gained;
   sword.charges = 0;
+  sword.public = false;
   sword.held = best.index;
   sword.x = best.x;
   sword.y = best.y;
@@ -1506,6 +1793,7 @@ function takeSword(game) {
   floatText(game, best.x, best.y - 20, gained ? `Sword +${gained}` : 'The sword', '#ffd36a');
   burst(game, best.x, best.y, '#ffd36a', 12, 70);
   game.fx.push('glint');
+  revealHunter(best);
   pushToast(game, `${verb(best.name, 'take')} the charged sword`);
 }
 
@@ -1539,6 +1827,10 @@ function separateAll(game) {
   }
   for (const g of game.goblins) {
     for (const p of living) separate(game, g, p);
+  }
+  for (const cult of game.cultists || []) {
+    if (!cult.alive) continue;
+    for (const p of living) separate(game, cult, p);
   }
 }
 
@@ -1602,6 +1894,7 @@ function ignite(game, attacker, target) {
     ent.burner = attacker;
   };
   for (const g of game.goblins) spark(g);
+  for (const cult of game.cultists || []) spark(cult);
   for (const other of game.players) spark(other);
 }
 

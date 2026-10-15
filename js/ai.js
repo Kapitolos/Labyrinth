@@ -3,6 +3,7 @@ import { tileCenter, tileOf } from './config.js';
 import { isFloor, pointInRegion } from './maze.js';
 import { flood, shortestStep, bestStepAway, lineOfSight } from './path.js';
 import { occupantsOf } from './game.js';
+import { sees } from './vision.js';
 
 export function thinkBot(bot, game, dt) {
   const intent = { mx: 0, my: 0, attack: false, charge: false, use: false };
@@ -19,6 +20,8 @@ export function thinkBot(bot, game, dt) {
 
   const horn = game.minotaur;
   const threat = Math.hypot(bot.x - horn.x, bot.y - horn.y);
+  const hornSeen = horn.hp > 0 && (threat < 64 || sees(game.grid, bot, horn.x, horn.y));
+  remember(bot, game);
 
   if (bot.leverTimer > 0) {
     const sw = game.switches.find((s) => s.id === bot.telegraphSwitchId);
@@ -42,10 +45,12 @@ export function thinkBot(bot, game, dt) {
 
   const cls = bot.class;
   const melee = !cls || cls.attack !== 'bolt';
-  const prey = bestPrey(bot, game);
-  const swordFree = game.sword && game.sword.held == null;
+  const prey = visiblePrey(bot, game);
+  const loose = game.sword && game.sword.held == null ? game.sword : null;
+  const swordFree = loose && (loose.public || sees(game.grid, bot, loose.x, loose.y));
   const holding = game.sword && game.sword.held === bot.index;
-  const huntNow = !holding && (swordFree || game.players.some((p) => p.alive && p !== bot && (p.charges > 0 || game.sword?.held === p.index)));
+  const remembered = bot.memory && bot.memory.until > game.time;
+  const huntNow = !holding && (swordFree || prey || remembered);
 
   const trap = hotLever(bot, game);
   if (trap && !huntNow) {
@@ -54,7 +59,7 @@ export function thinkBot(bot, game, dt) {
     const unarmed = bot.charges <= 0 || bot.hp < bot.maxHp * 0.38;
     const alreadyOutside = !selfIn && d < 300 && !(bot.charges > 0 && threat < 90);
     if (unarmed || alreadyOutside) {
-      if (threat < 50 && horn.hp > 0) {
+      if (hornSeen && threat < 50 && horn.hp > 0) {
         const [c, r] = tileOf(bot.x, bot.y);
         const [mc, mr] = tileOf(horn.x, horn.y);
         faceStep(bot, intent, bestStepAway(game.grid, c, r, mc, mr));
@@ -81,7 +86,7 @@ export function thinkBot(bot, game, dt) {
   const fleeRadius = bot.charges <= 0 ? 52 : 78;
   const swordDist = swordFree ? Math.hypot(bot.x - game.sword.x, bot.y - game.sword.y) : Infinity;
   const diving = swordFree && bot.charges <= 0 && swordDist < 120;
-  if (!diving && threat < fleeRadius && horn.hp > 0 && (bot.charges <= 0 || bot.hp < bot.maxHp * 0.38 || charging || bot.stuckT > 0.9)) {
+  if (!diving && hornSeen && threat < fleeRadius && horn.hp > 0 && (bot.charges <= 0 || bot.hp < bot.maxHp * 0.38 || charging || bot.stuckT > 0.9)) {
     if (bot.stuckT > 0.9) bot.stuckT = 0;
     const [c, r] = tileOf(bot.x, bot.y);
     const [mc, mr] = tileOf(horn.x, horn.y);
@@ -130,9 +135,15 @@ export function thinkBot(bot, game, dt) {
     return intent;
   }
 
+  const bearer = game.players.find((p) => p.alive && p !== bot && game.sword?.held === p.index && sees(game.grid, bot, p.x, p.y));
   const quarry = !holding
-    ? game.players.find((p) => p.alive && p !== bot && game.sword?.held === p.index) || (prey && prey.charges > 0 ? prey : null)
+    ? bearer || (prey && prey.charges > 0 ? prey : null)
     : (bot.charges <= 0 && prey && prey.charges > 0 ? prey : null);
+  if (!quarry && remembered && !holding) {
+    stepToward(bot, intent, game, bot.memory.x, bot.memory.y);
+    bot.wasMoving = true;
+    return intent;
+  }
   if (quarry) {
     if (maybeGate(bot, intent, game, quarry)) return intent;
     const d = Math.hypot(quarry.x - bot.x, quarry.y - bot.y);
@@ -259,19 +270,22 @@ function chooseGoal(bot, game) {
     const heal = nearestLoot(game, scoreOf, 'heal');
     if (heal) return heal;
   }
-  if (bot.charges <= 0 && game.sword && game.sword.held == null) {
+  if (bot.charges <= 0 && game.sword && game.sword.held == null && (game.sword.public || sees(game.grid, bot, game.sword.x, game.sword.y))) {
     const [c, r] = tileOf(game.sword.x, game.sword.y);
     if (scoreOf(c, r) >= 0) return { c, r };
   }
   if (bot.charges <= 0) {
     const charge = nearestLoot(game, scoreOf, 'charge');
-    if (charge) return charge;
-    const prey = bestPrey(bot, game);
-    if (prey) {
+    if (charge) {
+      const [lx, ly] = tileCenter(charge.c, charge.r);
+      if (sees(game.grid, bot, lx, ly)) return charge;
+    }
+    const prey = visiblePrey(bot, game);
+    if (prey && prey.charges > 0) {
       const [pc, pr] = tileOf(prey.x, prey.y);
       if (scoreOf(pc, pr) >= 0) return { c: pc, r: pr };
     }
-  } else if (game.minotaur.hp > 0) {
+  } else if (game.minotaur.hp > 0 && sees(game.grid, bot, game.minotaur.x, game.minotaur.y)) {
     const [c, r] = tileOf(game.minotaur.x, game.minotaur.y);
     if (scoreOf(c, r) >= 0) return { c, r };
   }
@@ -380,11 +394,39 @@ function maybeGate(bot, intent, game, goal) {
   return true;
 }
 
-function bestPrey(bot, game) {
+function nearestGoblin(game, bot, range) {
+  let best = null;
+  let bestD = range;
+  const foes = game.goblins.concat(game.cultists || []);
+  for (const g of foes) {
+    if (!g.alive) continue;
+    const d = Math.hypot(bot.x - g.x, bot.y - g.y);
+    if (d <= bestD && sees(game.grid, bot, g.x, g.y)) {
+      best = g;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+function remember(bot, game) {
+  if (!bot.memory) bot.memory = { until: 0, x: bot.x, y: bot.y };
+  for (const p of game.players) {
+    if (p === bot || !p.alive || !sees(game.grid, bot, p.x, p.y)) continue;
+    const worth = p.charges > 0 || game.sword?.held === p.index;
+    if (!worth && bot.memory.until > game.time) continue;
+    bot.memory.until = game.time + 6;
+    bot.memory.x = p.x;
+    bot.memory.y = p.y;
+    if (worth) return;
+  }
+}
+
+function visiblePrey(bot, game) {
   let best = null;
   let bestScore = Infinity;
   for (const p of game.players) {
-    if (p === bot || !p.alive) continue;
+    if (p === bot || !p.alive || !sees(game.grid, bot, p.x, p.y)) continue;
     const d = Math.hypot(p.x - bot.x, p.y - bot.y);
     const score = d - (p.charges > 0 ? 240 : 0) + p.hp * 0.15;
     if (score < bestScore) {
@@ -395,24 +437,18 @@ function bestPrey(bot, game) {
   return best;
 }
 
-function nearestGoblin(game, bot, range) {
-  let best = null;
-  let bestD = range;
-  for (const g of game.goblins) {
-    if (!g.alive) continue;
-    const d = Math.hypot(bot.x - g.x, bot.y - g.y);
-    if (d <= bestD) {
-      best = g;
-      bestD = d;
-    }
-  }
-  return best;
-}
-
 function maybeShield(bot, intent, game) {
   if (bot.class?.id !== 'knight' || bot.stun > 0) return false;
   let threat = null;
   let best = 90;
+  const casters = (game.cultists || []).filter((cult) => cult.alive && cult.cast === 'windup' && cult.castWho === bot.index && (cult.castT || 0) >= 0.35);
+  for (const cult of casters) {
+    const d = Math.hypot(cult.x - bot.x, cult.y - bot.y);
+    if (d < best) {
+      best = d;
+      threat = cult;
+    }
+  }
   for (const g of game.goblins) {
     if (!g.alive || g.strike !== 'windup' || g.strikeWho !== bot.index) continue;
     if ((g.strikeT || 0) < 0.32) continue;
