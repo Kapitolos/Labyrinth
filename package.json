@@ -1,0 +1,8 @@
+{
+  "name": "locked-with-the-minotaur",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

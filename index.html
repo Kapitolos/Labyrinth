@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Locked with the Minotaur</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="topbar" hidden>
+      <div id="clock">0:00</div>
+      <div id="boss">
+        <div class="boss-copy">
+          <strong>The Minotaur</strong>
+          <small>A charged blow spends one charge</small>
+        </div>
+        <div class="bar boss-bar"><div id="boss-fill"></div></div>
+        <div id="boss-hp">6/6</div>
+      </div>
+      <div class="top-actions">
+        <span class="hint">Hold Z for the whole maze · Esc pauses</span>
+        <button id="mute" type="button">Sound on</button>
+      </div>
+    </header>
+
+    <div id="stage">
+      <canvas id="view" tabindex="0" aria-label="The labyrinth"></canvas>
+      <div id="toasts"></div>
+      <div id="banner" class="hidden"></div>
+      <div id="prompt" class="hidden">
+        <div id="prompt-title"></div>
+        <div id="prompt-lines"></div>
+      </div>
+    </div>
+
+    <footer id="hud" hidden></footer>
+
+    <section id="menu" class="overlay">
+      <div class="panel menu-card">
+        <div class="intro">
+          <svg class="mark" viewBox="0 0 88 48" aria-hidden="true">
+            <path d="M10 40 C20 40 22 16 32 8 C34 22 28 36 24 40" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            <path d="M78 40 C68 40 66 16 56 8 C54 22 60 36 64 40" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            <circle cx="44" cy="28" r="10" fill="none" stroke="currentColor" stroke-width="3"/>
+          </svg>
+          <p class="eyebrow">Four hunters. One locked maze.</p>
+          <h1>Locked with<br>the Minotaur</h1>
+          <p class="lede">The sword at the heart holds three charges. Only its bearer can wound the Minotaur, and each wound spends one. Kill a hunter to take the charges they carry. The one who lands the last blow is the one who leaves.</p>
+          <ul class="rules">
+            <li>The sword lies in the center. Only one hunter can hold it, and its charges run out.</li>
+            <li>Chests and goblins hide vigor, charges, fire, and a gift for your calling. Fire spreads when the gift says so.</li>
+            <li>Goblins cock their blade before they strike. A knight holds the shield to block, and a shield raised as the blow lands parries it.</li>
+            <li>Running and striking spend stamina. The thief catches their breath fastest. The knight is slowest.</li>
+            <li>Twin pads stand at the ends of the maze. Step through, then the way sleeps for ten seconds.</li>
+            <li>The Minotaur kills quickly. Do not stand in its path.</li>
+            <li>A lever stands just outside the wing it rebuilds. Step close and that wing lights up.</li>
+            <li>Look who is inside, and whether the Minotaur is with them, before you throw it.</li>
+            <li>Empty seats are filled by rivals who will take the kill if you hesitate.</li>
+            <li>Click a calling to change it. Only a strike with the charged sword wounds the Minotaur.</li>
+          </ul>
+          <div class="class-board">
+            <p class="eyebrow">The record</p>
+            <ol id="scoreboard" class="scoreboard"></ol>
+          </div>
+          <div class="class-board">
+            <p class="eyebrow">The company</p>
+            <div id="class-picks"></div>
+          </div>
+          <div class="choices">
+            <button class="choice primary" type="button" data-humans="1">
+              <strong>Hunt alone</strong>
+              <span>You, and three rivals</span>
+            </button>
+            <button class="choice" type="button" data-humans="2">
+              <strong>Two at the gate</strong>
+              <span>Two hunters, two rivals</span>
+            </button>
+            <button class="choice" type="button" data-humans="3">
+              <strong>Three at the gate</strong>
+              <span>Three hunters, one rival</span>
+            </button>
+            <button class="choice" type="button" data-humans="4">
+              <strong>Four at the gate</strong>
+              <span>No rivals. Every blade is held by a person.</span>
+            </button>
+          </div>
+        </div>
+        <aside class="hands">
+          <h2>Hands on the gate</h2>
+          <p>Same keyboard, or a controller for each hunter. Bottom button strikes, right button spends a charge, left button throws a lever, top button raises a knight's shield, left shoulder runs. Num Lock on for the fourth hunter.</p>
+          <div id="controls-help" class="binds"></div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="pause" class="overlay hidden">
+      <div class="panel narrow">
+        <p class="eyebrow">The maze holds its breath</p>
+        <h2>Paused</h2>
+        <div id="pause-controls" class="binds"></div>
+        <div class="row">
+          <button id="resume" class="choice primary" type="button"><strong>Return to the hunt</strong></button>
+          <button id="pause-menu" class="choice" type="button"><strong>Back to the gate</strong></button>
+        </div>
+      </div>
+    </section>
+
+    <section id="end" class="overlay hidden">
+      <div class="panel narrow">
+        <p class="eyebrow">The horn breaks</p>
+        <h2 id="end-title">The Minotaur falls</h2>
+        <p id="end-sub" class="lede"></p>
+        <ul id="end-stats" class="stats"></ul>
+        <p class="eyebrow">The record</p>
+        <ol id="end-board" class="scoreboard"></ol>
+        <div class="row">
+          <button id="rematch" class="choice primary" type="button"><strong>Seal the gate again</strong></button>
+          <button id="end-menu" class="choice" type="button"><strong>Back to the gate</strong></button>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
