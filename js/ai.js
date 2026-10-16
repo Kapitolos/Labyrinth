@@ -160,13 +160,11 @@ export function thinkBot(bot, game, dt) {
   }
 
   if (holding && bot.charges > 0 && bot.hp > bot.maxHp * 0.3 && hornSeen && horn.state !== 'charge') {
-    const reach = melee
-      ? (cls?.chargedRange || 54) + horn.radius - 4
-      : (cls.chargedRange || 220) * 0.92;
-    const los = melee || lineOfSight(game.grid, bot.x, bot.y, horn.x, horn.y);
-    if (los && threat < (melee ? 90 : reach + 24)) {
+    const reach = 56 + horn.radius - 4;
+    const los = lineOfSight(game.grid, bot.x, bot.y, horn.x, horn.y);
+    if (threat < 110) {
       faceToward(bot, intent, horn.x, horn.y);
-      if (threat < reach) {
+      if (los && threat < reach) {
         intent.mx = 0;
         intent.my = 0;
         intent.charge = true;

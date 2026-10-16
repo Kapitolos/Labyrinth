@@ -123,6 +123,7 @@ export function render(ctx, game, view, cam, opts = {}) {
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   game.fogIn = veil(cam);
+  if (game.sword) game.sword.counting = introCount(cam) > 0;
 
   drawTiles(ctx, game);
   drawTurningWings(ctx, game);
@@ -137,6 +138,7 @@ export function render(ctx, game, view, cam, opts = {}) {
     drawWingTags(ctx, game, view, cam);
     drawFloats(ctx, game, view, cam);
     drawMinimap(ctx, game, view);
+    drawIntroCount(ctx, view, cam);
     drawCallout(ctx, game, view);
     drawPointers(ctx, game, view, cam);
     drawVignette(ctx, view, game);
@@ -396,6 +398,7 @@ function drawChargedSword(ctx, sword, time) {
   ctx.arc(sword.x, sword.y + bob, 16 + Math.sin(time * 4) * 1.5, 0, Math.PI * 2);
   ctx.fill();
   blit(ctx, propCanvas('sword'), sword.x, sword.y + bob);
+  if (sword.counting) return;
   ctx.fillStyle = '#ffd36a';
   ctx.font = '700 11px Georgia, serif';
   ctx.textAlign = 'center';
@@ -444,6 +447,26 @@ function drawDoor(ctx, door) {
   ctx.fillRect(-3, -14, 6, 28);
   ctx.fillStyle = '#d7c091';
   ctx.fillRect(-1, 4, 2, 3);
+  ctx.restore();
+}
+
+function introCount(cam) {
+  if (!cam || !(cam.introLeft > 0) || !(cam.intro > 0)) return 0;
+  const beat = cam.intro / 3;
+  return Math.min(3, Math.max(1, Math.ceil(cam.introLeft / beat)));
+}
+
+function drawIntroCount(ctx, view, cam) {
+  const n = introCount(cam);
+  if (!n) return;
+  const y = view.h * 0.4;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = '700 84px Georgia, Palatino, serif';
+  ctx.fillStyle = '#1a1208';
+  ctx.fillText(String(n), view.w / 2 + 3, y + 3);
+  ctx.fillStyle = '#ffd36a';
+  ctx.fillText(String(n), view.w / 2, y);
   ctx.restore();
 }
 
@@ -665,6 +688,9 @@ function drawSwing(ctx, p) {
     ctx.strokeStyle = 'rgba(255,255,255,0.7)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
+    ctx.translate(p.x + Math.cos(ang) * 18, p.y + Math.sin(ang) * 18);
+    ctx.rotate(ang + Math.PI / 2);
+    blit(ctx, propCanvas('sword'), 0, 0);
   }
   ctx.restore();
 }

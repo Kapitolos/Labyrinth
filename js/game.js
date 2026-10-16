@@ -652,8 +652,9 @@ export function pushToast(game, text) {
 export function updateMatch(game, intents, dt, frozen = false) {
   const step = Math.min(Math.max(dt, 0), 0.05);
   decayVisuals(game, step);
-  if (frozen || game.phase !== 'play') return;
+  if (game.phase !== 'play') return;
   game.time += step;
+  if (frozen) return;
   for (const sw of game.switches) sw.cd = Math.max(0, sw.cd - step);
   game.gateCd = Math.max(0, (game.gateCd || 0) - step);
 
@@ -798,7 +799,7 @@ function updatePlayer(game, p, intent, dt) {
     speed *= running ? 1.08 : 0.68;
     if (p.slow > 0) speed *= 0.55;
     if (p.blocking) speed *= 0.34;
-    if (p.swing?.kind === 'charged') speed *= p.class?.chargedMove ?? 0.28;
+    if (p.swing?.kind === 'charged') speed *= 0.62;
     else if (p.swing) speed *= p.class?.normalMove ?? 0.55;
     tryMove(game, p, mx * speed * dt, my * speed * dt);
   }
@@ -854,11 +855,11 @@ function startSwing(game, p, kind) {
   const len = Math.hypot(p.fx, p.fy) || 1;
   p.swing = {
     kind,
-    style: cls?.attack || 'melee',
+    style: charged ? 'melee' : (cls?.attack || 'melee'),
     age: 0,
-    duration: charged ? (cls?.chargedDuration ?? 0.42) : (cls?.normalDuration ?? 0.22),
-    range: charged ? (cls?.chargedRange ?? CHARGED_RANGE) : (cls?.normalRange ?? NORMAL_RANGE),
-    cone: charged ? (cls?.chargedCone ?? CHARGED_CONE) : (cls?.normalCone ?? NORMAL_CONE),
+    duration: charged ? 0.28 : (cls?.normalDuration ?? 0.22),
+    range: charged ? 56 : (cls?.normalRange ?? NORMAL_RANGE),
+    cone: charged ? 1.05 : (cls?.normalCone ?? NORMAL_CONE),
     dirx: p.fx / len,
     diry: p.fy / len,
     hit: new Set(),
@@ -866,8 +867,8 @@ function startSwing(game, p, kind) {
     fired: false,
     spent: charged,
   };
-  p.attackCd = charged ? (cls?.chargedCd ?? 0.92) : (cls?.normalCd ?? 0.46);
-  note(game, charged ? (cls?.chargedSound || 'charge') : (cls?.normalSound || 'swing'), p.x, p.y);
+  p.attackCd = charged ? 0.68 : (cls?.normalCd ?? 0.46);
+  note(game, charged ? 'charge' : (cls?.normalSound || 'swing'), p.x, p.y);
 }
 
 function cancelSwing(p) {
@@ -895,9 +896,7 @@ function resolveSwing(game, p) {
   }
   if (t < 0.34 || t > 0.92) return;
 
-  const amount = s.kind === 'charged'
-    ? (p.class?.chargedGoblin ?? 2)
-    : (p.class?.normalGoblin ?? 1);
+  const amount = s.kind === 'charged' ? 2 : (p.class?.normalGoblin ?? 1);
   for (const g of game.goblins) {
     if (!g.alive || s.hit.has(g.id)) continue;
     if (!inCone(game.grid, p, s, g)) continue;
@@ -913,9 +912,7 @@ function resolveSwing(game, p) {
     damageCultist(game, p, cult, amount, 170);
   }
 
-  const hunterHit = s.kind === 'charged'
-    ? (p.class?.chargedHunter ?? 48)
-    : (p.class?.normalHunter ?? 28);
+  const hunterHit = s.kind === 'charged' ? 64 : (p.class?.normalHunter ?? 28);
   for (const other of game.players) {
     if (other === p || !other.alive || other.invuln > 0 || s.hit.has(other.index)) continue;
     if (!inCone(game.grid, p, s, other)) continue;
